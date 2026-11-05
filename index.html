@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Template Perjanjian (Mockup)</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <button type="button" class="skip-link" data-action="skip">Lewati ke konten utama</button>
+
+  <header class="appbar">
+    <div class="appbar-inner">
+      <a class="brand" href="#/"><span class="brand-mark" aria-hidden="true"></span>Konsol Admin</a>
+      <nav class="appnav" aria-label="Utama">
+        <a href="#/" aria-current="page">Template Perjanjian</a>
+      </nav>
+      <p class="appbar-user">Masuk sebagai <strong>Nadia Putri</strong></p>
+    </div>
+  </header>
+
+  <div class="simbar" role="region" aria-label="Mode simulasi">
+    <div class="simbar-inner">
+      <span class="sim-tag">Mode simulasi</span>
+      <fieldset class="sim-perms">
+        <legend>Izin admin:</legend>
+        <label><input type="checkbox" data-perm="read"> Baca</label>
+        <label><input type="checkbox" data-perm="edit"> Edit</label>
+        <label><input type="checkbox" data-perm="publish"> Terbitkan/Arsipkan</label>
+      </fieldset>
+      <div class="sim-data">
+        <button type="button" class="btn btn-small btn-ghost" data-action="reset-data">Muat ulang data contoh</button>
+        <button type="button" class="btn btn-small btn-ghost" data-action="clear-data">Kosongkan data</button>
+      </div>
+    </div>
+  </div>
+
+  <main id="main" class="container" tabindex="-1"></main>
+
+  <footer class="footer">
+    <p>Mockup interaktif · data contoh lokal di memori · tanpa koneksi backend · data kembali ke awal saat halaman dimuat ulang</p>
+  </footer>
+
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+  <dialog id="dialog" class="dialog"></dialog>
+
+  <script src="js/markdown.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
