@@ -4,14 +4,19 @@
 
   const MD = window.AgreementMarkdown;
   const S = window.AgreementStore;
+  const U = window.AgreementUser;
   const esc = MD.escapeHtml;
 
   const ACTOR = 'Nadia Putri';
   const OTHER_ADMIN = 'Bagas Wirawan';
   const SAMPLE_LABEL = 'Contoh — bukan dokumen pengguna';
 
+  const seedData = S.createSeedState();
   const app = {
-    data: S.createSeedState(),
+    data: seedData,
+    // User side: explicit assignments with immutable snapshots (separate from templates).
+    user: U.createSeedUserState(seedData),
+    simOpen: false,
     perms: { read: true, edit: true, publish: true },
     list: { q: '', status: 'all', draftOnly: false },
     editor: null,
@@ -47,6 +52,10 @@
       return { name: 'notfound' };
     }
     if (parts.length === 0) return { name: 'list' };
+    if (parts[0] === 'saya') {
+      if (parts.length === 1) return { name: 'user-list' };
+      if (parts.length === 2) return { name: 'user-doc', id: parts[1] };
+    }
     if (parts[0] === 'baru' && parts.length === 1) return { name: 'create' };
     if (parts[0] === 't' && parts[1]) {
       if (parts.length === 2) return { name: 'detail', id: parts[1] };
@@ -928,6 +937,240 @@
     });
   }
 
+  /* ---------- User side (simulated user) ---------- */
+
+  const CONSENT_LABEL = 'Saya telah membaca dan menyetujui perjanjian ini.';
+  const phLabel = (key) => (MD.PLACEHOLDERS.find((p) => p.key === key) || { label: key }).label;
+
+  function userBadge(acceptance) {
+    return acceptance
+      ? '<span class="badge badge-success">Sudah disetujui</span>'
+      : '<span class="badge badge-warn">Belum disetujui</span>';
+  }
+
+  function userNotFound() {
+    return `
+      <section class="state" aria-labelledby="page-title">
+        <h1 id="page-title" tabindex="-1">Perjanjian tidak ditemukan</h1>
+        <p>Perjanjian ini tidak ditugaskan kepada Anda.</p>
+        <p><a class="btn" href="#/saya">Kembali ke Perjanjian Saya</a></p>
+      </section>`;
+  }
+
+  function renderUserList() {
+    const items = U.listForUser(app.user)
+      .slice().sort((a, b) => b.assignment.assignedAt.localeCompare(a.assignment.assignedAt));
+    const pending = items.filter((x) => !x.acceptance);
+    const done = items.filter((x) => x.acceptance)
+      .sort((a, b) => b.acceptance.acceptedAt.localeCompare(a.acceptance.acceptedAt));
+
+    const card = ({ assignment: a, acceptance: acc }) => {
+      const s = a.snapshot;
+      return `
+        <li class="agr-card">
+          <a class="agr-link" href="#/saya/${esc(a.id)}">${esc(s.title)}<span class="visually-hidden">, Versi ${s.templateVersion}</span></a>
+          <p class="agr-meta"><span>Versi ${s.templateVersion}</span>${userBadge(acc)}</p>
+          <p class="agr-sub">${acc ? `Disetujui ${timeTag(acc.acceptedAt)}` : `Ditugaskan ${timeTag(a.assignedAt)}`}</p>
+          ${!acc && s.missing.length ? '<p class="agr-warn">Dokumen tidak tersedia: data profil belum lengkap.</p>' : ''}
+        </li>`;
+    };
+    const group = (id, title, list, empty) => `
+      <section class="agr-group" aria-labelledby="${id}">
+        <h2 id="${id}">${title} <span class="count">(${list.length})</span></h2>
+        ${list.length ? `<ul class="agr-list">${list.map(card).join('')}</ul>` : `<p class="muted">${empty}</p>`}
+      </section>`;
+
+    return `
+      <div class="page-head">
+        <div>
+          <h1 id="page-title" tabindex="-1">Perjanjian Saya</h1>
+          <p class="lede">Perjanjian yang ditugaskan kepada Anda.</p>
+        </div>
+      </div>
+      ${items.length
+        ? group('pending-h', 'Belum disetujui', pending, 'Tidak ada perjanjian yang menunggu persetujuan.') +
+          group('done-h', 'Sudah disetujui', done, 'Belum ada perjanjian yang disetujui.')
+        : `<section class="state" aria-labelledby="empty-h">
+             <div class="state-icon" aria-hidden="true">${ICON_DOC}</div>
+             <h2 id="empty-h">Belum ada perjanjian</h2>
+             <p>Belum ada perjanjian yang ditugaskan kepada Anda.</p>
+           </section>`}
+      ${simPanel()}`;
+  }
+
+  /** Clearly labelled simulation controls. Not part of the admin product UI. */
+  function simPanel() {
+    const profile = app.user.profile;
+    const radios = Object.entries(U.PROFILE_PRESETS).map(([key, p]) => `
+      <label class="check"><input type="radio" name="sim-profile" id="sim-profile-${key}" value="${key}"${profile.preset === key ? ' checked' : ''}>
+        ${esc(p.label)} <span class="muted">(${p.values.nama_lengkap ? esc(p.values.nama_lengkap) : 'kosong'})</span></label>`).join('');
+    const options = app.data.templates
+      .filter((t) => !t.archived && t.versions.length)
+      .map((t) => {
+        const v = S.latestVersion(t);
+        return `<option value="${esc(t.id)}">${esc(v.title)} — Versi ${v.number}</option>`;
+      }).join('');
+    return `
+      <details class="sim-panel" id="sim-panel"${app.simOpen ? ' open' : ''}>
+        <summary>Kontrol simulasi</summary>
+        <p class="hint">Hanya untuk demonstrasi. Identitas pengguna tetap sama dan nilai di dalam perjanjian tidak dapat diubah oleh pengguna.</p>
+        <fieldset class="sim-fieldset">
+          <legend>Data profil sintetis (pengguna ${esc(profile.userId)})</legend>
+          ${radios}
+          <p class="hint">Perubahan profil hanya memengaruhi penugasan baru. Dokumen yang sudah ditugaskan tidak berubah.</p>
+        </fieldset>
+        <div class="sim-fieldset">
+          <label for="sim-assign-tpl" class="sim-legend">Tugaskan versi terbit terbaru</label>
+          <div class="sim-assign">
+            <select id="sim-assign-tpl"${options ? '' : ' disabled'}>${options || '<option>Tidak ada template terbit yang aktif</option>'}</select>
+            <button type="button" class="btn btn-small" data-action="sim-assign"${options ? '' : ' disabled'}>Tugaskan (simulasi)</button>
+          </div>
+          <p class="hint">Draf dan template yang diarsipkan tidak dapat ditugaskan. Menerbitkan versi di Konsol Admin tidak menugaskan apa pun.</p>
+        </div>
+      </details>`;
+  }
+
+  /** Make rendered table scrollers keyboard-focusable and labelled. Presentation only. */
+  const a11yTables = (html) => html.replace(/<div class="table-wrap">/g,
+    '<div class="table-wrap" tabindex="0" role="region" aria-label="Tabel, geser untuk melihat semua kolom">');
+
+  function renderUserDoc(route) {
+    const a = U.getAssignment(app.user, route.id);
+    if (!a) return userNotFound();
+    const s = a.snapshot;
+    const acc = U.acceptanceFor(app.user, a);
+    const unavailable = s.missing.length > 0;
+
+    const accepted = acc ? `
+      <section class="callout callout-success" id="accept-result" tabindex="-1" role="status" aria-labelledby="accepted-h">
+        <h2 id="accepted-h">Perjanjian telah disetujui</h2>
+        <dl class="dl dl-compact">
+          <dt>Versi disetujui</dt><dd>Versi ${s.templateVersion}</dd>
+          <dt>Waktu persetujuan</dt><dd>${timeTag(acc.acceptedAt)}</dd>
+        </dl>
+        <p>Dokumen di bawah ini hanya baca dan sama persis dengan yang Anda setujui.</p>
+      </section>` : '';
+
+    const doc = unavailable ? `
+      <section class="callout callout-danger" id="doc-unavailable" aria-labelledby="unavail-h">
+        <h2 id="unavail-h">Dokumen tidak tersedia</h2>
+        <p>Data berikut belum ada di profil Anda saat dokumen ini dibuat:
+        <strong>${s.missing.map((k) => esc(phLabel(k))).join(', ')}</strong>.
+        Isi dokumen tidak ditampilkan dan perjanjian belum dapat disetujui.</p>
+      </section>` : `
+      <article class="doc doc-user" aria-labelledby="doc-title">
+        <p class="doc-sample-label">Dokumen simulasi · data sintetis</p>
+        <h2 class="doc-title" id="doc-title">${esc(s.title)}</h2>
+        <p class="doc-version">Versi ${s.templateVersion}</p>
+        <div class="doc-body">${a11yTables(s.html)}</div>
+      </article>`;
+
+    const acceptPanel = acc ? '' : `
+      <section class="accept-panel" aria-labelledby="accept-h">
+        <h2 id="accept-h">Persetujuan</h2>
+        <label class="consent">
+          <input type="checkbox" id="consent"${unavailable ? ' disabled' : ''} aria-describedby="accept-hint">
+          <span>${CONSENT_LABEL}</span>
+        </label>
+        <button type="button" class="btn btn-primary btn-block" id="btn-accept" data-action="user-accept" data-id="${esc(a.id)}" disabled aria-describedby="accept-hint">Setujui Perjanjian</button>
+        <p id="accept-hint" class="hint">${unavailable
+          ? 'Persetujuan tidak tersedia karena dokumen tidak dapat ditampilkan.'
+          : 'Centang kotak di atas untuk mengaktifkan tombol. Persetujuan baru dicatat setelah Anda mengonfirmasi.'}</p>
+      </section>`;
+
+    return `
+      ${crumbs([{ label: 'Perjanjian Saya', href: '#/saya' }, { label: s.title }])}
+      <div class="page-head">
+        <div>
+          <h1 id="page-title" tabindex="-1">${esc(s.title)}</h1>
+          <p class="lede"><span>Versi ${s.templateVersion}</span>${userBadge(acc)}</p>
+        </div>
+      </div>
+      <div class="user-doc">
+        ${accepted}
+        ${doc}
+        ${acceptPanel}
+      </div>`;
+  }
+
+  function bindUser() {
+    const consent = $('#consent');
+    if (consent) {
+      consent.addEventListener('change', () => { $('#btn-accept').disabled = !consent.checked; });
+    }
+    const panel = $('#sim-panel');
+    if (panel) {
+      panel.addEventListener('toggle', () => { app.simOpen = panel.open; });
+      panel.querySelectorAll('input[name="sim-profile"]').forEach((r) => r.addEventListener('change', () => {
+        U.setProfile(app.user, r.value);
+        toast('Simulasi: profil diperbarui. Dokumen yang sudah ditugaskan tidak berubah.');
+        render();
+      }));
+    }
+  }
+
+  function simAssign() {
+    const sel = $('#sim-assign-tpl');
+    const t = sel && S.getTemplate(app.data, sel.value);
+    if (!t) return;
+    const v = S.latestVersion(t);
+    try {
+      const a = U.assignVersion(app.user, app.data, t.id, v && v.number, now());
+      toast(`Simulasi: “${a.snapshot.title}” Versi ${a.snapshot.templateVersion} ditugaskan.`);
+      render();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
+  /** The page the dialog was opened from must still be showing, with consent checked. */
+  function consentGivenFor(id) {
+    const btn = $('#btn-accept');
+    const box = $('#consent');
+    return Boolean(btn && box && btn.dataset.id === id && box.checked && !box.disabled);
+  }
+
+  function openAcceptModal(id) {
+    const a = U.getAssignment(app.user, id);
+    if (!a) return;
+    if (U.acceptanceFor(app.user, a)) { render(); return; }
+    if (a.snapshot.missing.length || !consentGivenFor(id)) return;
+    const s = a.snapshot;
+    openModal({
+      title: 'Setujui perjanjian?',
+      body: `
+        <p>Anda akan menyetujui <strong>${esc(s.title)}</strong>, <strong>Versi ${s.templateVersion}</strong>.</p>
+        <p>Persetujuan dicatat untuk dokumen persis seperti yang ditampilkan.</p>
+        <p class="hint">Simulasi: dicatat di memori untuk pengguna sintetis, tanpa tanda tangan elektronik atau kekuatan hukum.</p>`,
+      confirmLabel: 'Ya, setujui',
+      onConfirm: () => confirmAccept(id),
+    });
+  }
+
+  /** Re-checks acceptance state on every confirmation (repeated or stale dialogs). */
+  function confirmAccept(id) {
+    const a = U.getAssignment(app.user, id);
+    if (!a) return;
+    const existing = U.acceptanceFor(app.user, a);
+    if (existing) {
+      toast(`Perjanjian ini sudah disetujui pada ${fmt(existing.acceptedAt)}. Tidak ada perubahan.`, 'warn');
+      if (parseRoute().id === id) render();
+      return;
+    }
+    // Leaving the page or unchecking consent means no acceptance.
+    if (!consentGivenFor(id)) return;
+    try {
+      U.acceptAssignment(app.user, id, now());
+    } catch (err) {
+      toast(err.message, 'error');
+      render();
+      return;
+    }
+    render();
+    const result = $('#accept-result');
+    if (result) result.focus();
+  }
+
   /* ---------- Toasts ---------- */
 
   function toast(message, kind) {
@@ -940,7 +1183,12 @@
 
   /* ---------- Render ---------- */
 
+  const isUserRoute = (route) => route.name === 'user-list' || route.name === 'user-doc';
+
   function view(route) {
+    // The user side is not governed by the admin permission simulation.
+    if (route.name === 'user-list') return `<div class="user-page">${renderUserList()}</div>`;
+    if (route.name === 'user-doc') return `<div class="user-page">${renderUserDoc(route)}</div>`;
     if (!app.perms.read) return deniedState('Baca', 'melihat template perjanjian');
     switch (route.name) {
       case 'list': return renderList();
@@ -961,12 +1209,20 @@
     } catch (_) { /* not a text control */ }
 
     const route = parseRoute();
+    const side = isUserRoute(route) ? 'user' : 'admin';
+    document.querySelectorAll('[data-side]').forEach((el) => { el.hidden = el.dataset.side !== side; });
+    document.querySelectorAll('[data-view]').forEach((el) => {
+      if (el.dataset.view === side) el.setAttribute('aria-current', 'page');
+      else el.removeAttribute('aria-current');
+    });
     main.innerHTML = view(route);
     bindList();
     bindEditor();
+    bindUser();
 
     const heading = $('#page-title');
-    document.title = (heading ? heading.textContent + ' · ' : '') + 'Template Perjanjian (Mockup)';
+    const suffix = side === 'user' ? 'Perjanjian Saya (Mockup)' : 'Template Perjanjian (Mockup)';
+    document.title = (heading ? heading.textContent + ' · ' : '') + suffix;
     if (opts && opts.nav) {
       window.scrollTo(0, 0);
       if (heading) heading.focus({ preventScroll: true });
@@ -1039,12 +1295,16 @@
         } catch (err) { handleStoreError(err); }
         break;
       }
+      case 'user-accept': openAcceptModal(id); break;
+      case 'sim-assign': simAssign(); break;
       case 'reload-draft': reloadDraft(); break;
       case 'dismiss-recovered': app.editor.recovered = null; updateEditorLive(); break;
       case 'reset-data':
       case 'clear-data':
         if (isDirty(app.editor) && !window.confirm('Perubahan draf belum disimpan akan hilang. Lanjutkan?')) break;
         app.data = action === 'reset-data' ? S.createSeedState() : { nextId: 1, templates: [] };
+        // Clearing templates leaves user snapshots alone: they never depend on templates.
+        if (action === 'reset-data') app.user = U.createSeedUserState(app.data);
         app.editor = null;
         app.detailView = {};
         app.list = { q: '', status: 'all', draftOnly: false };

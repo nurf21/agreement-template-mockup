@@ -1,32 +1,7 @@
 // DOM smoke test: drives the mockup through its main flows in jsdom.
-const { JSDOM } = require('jsdom');
-const path = require('path');
-const fs = require('fs');
-const root = path.join(__dirname, '..');
-const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+const { load } = require('./dom-harness');
 
-const dom = new JSDOM(html, {
-  url: 'http://localhost/index.html', runScripts: 'outside-only', pretendToBeVisual: true,
-});
-const w = dom.window;
-const errors = [];
-w.addEventListener('error', (e) => errors.push(e.error || e.message));
-w.matchMedia = () => ({ matches: true });
-w.scrollTo = () => {};
-w.HTMLElement.prototype.scrollIntoView = () => {};
-w.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
-w.HTMLDialogElement.prototype.close = function (v) { this.open = false; if (v !== undefined) this.returnValue = v; this.onclose && this.onclose(); };
-w.confirm = () => true;
-for (const f of ['markdown.js', 'store.js', 'app.js']) w.eval(fs.readFileSync(path.join(root, 'js', f), 'utf8'));
-
-const $ = (s) => w.document.querySelector(s);
-const text = () => $('#main').textContent.replace(/\s+/g, ' ');
-const tick = () => new Promise((r) => setTimeout(r, 20));
-const go = async (h) => { w.location.hash = h; await tick(); };
-const click = (el) => { if (!el) throw new Error('missing element'); el.dispatchEvent(new w.MouseEvent('click', { bubbles: true })); };
-const type = (sel, v) => { const el = $(sel); el.value = v; el.dispatchEvent(new w.Event('input', { bubbles: true })); };
-const confirmDialog = () => { const d = $('#dialog'); d.returnValue = 'confirm'; d.close(); };
-const check = (cond, msg) => { if (!cond) throw new Error('FAIL: ' + msg); console.log('ok -', msg); };
+const { w, $, errors, text, tick, go, click, type, confirmDialog, check } = load();
 
 (async () => {
 check($('.data-table tbody').children.length === 5, 'list shows 5 seed templates');

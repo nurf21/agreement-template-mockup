@@ -9,7 +9,15 @@
 <body>
   <button type="button" class="skip-link" data-action="skip">Lewati ke konten utama</button>
 
-  <header class="appbar">
+  <nav class="viewswitch" aria-label="Pilih tampilan mockup">
+    <div class="viewswitch-inner">
+      <span class="viewswitch-label">Tampilan:</span>
+      <a href="#/" data-view="admin">Konsol Admin</a>
+      <a href="#/saya" data-view="user">Aplikasi Pengguna</a>
+    </div>
+  </nav>
+
+  <header class="appbar" data-side="admin">
     <div class="appbar-inner">
       <a class="brand" href="#/"><span class="brand-mark" aria-hidden="true"></span>Konsol Admin</a>
       <nav class="appnav" aria-label="Utama">
@@ -19,7 +27,7 @@
     </div>
   </header>
 
-  <div class="simbar" role="region" aria-label="Mode simulasi">
+  <div class="simbar" data-side="admin" role="region" aria-label="Mode simulasi">
     <div class="simbar-inner">
       <span class="sim-tag">Mode simulasi</span>
       <fieldset class="sim-perms">
@@ -35,6 +43,23 @@
     </div>
   </div>
 
+  <header class="appbar appbar-userside" data-side="user" hidden>
+    <div class="appbar-inner">
+      <a class="brand" href="#/saya"><span class="brand-mark brand-mark-user" aria-hidden="true"></span>Akun Saya</a>
+      <nav class="appnav" aria-label="Menu pengguna">
+        <a href="#/saya" aria-current="page">Perjanjian Saya</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="simbar simbar-user" data-side="user" role="region" aria-label="Pemberitahuan simulasi" hidden>
+    <div class="simbar-inner">
+      <span class="sim-tag">Simulasi</span>
+      <p class="sim-note">Anda masuk sebagai <strong>pengguna sintetis</strong> (ID <code>usr-sim-001</code>), bukan orang sungguhan.
+      Persetujuan di sini tidak sah secara hukum dan hilang saat halaman dimuat ulang.</p>
+    </div>
+  </div>
+
   <main id="main" class="container" tabindex="-1"></main>
 
   <footer class="footer">
@@ -46,6 +71,7 @@
 
   <script src="js/markdown.js"></script>
   <script src="js/store.js"></script>
+  <script src="js/user.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
