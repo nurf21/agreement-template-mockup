@@ -5,7 +5,7 @@
   "description": "Interactive admin mockup for personalized agreement templates (local mock data only).",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "test:ui": "node tests/ui-smoke.js"
+    "test:ui": "node tests/ui-smoke.js && node tests/ui-user.js"
   },
   "devDependencies": {
     "jsdom": "^25.0.1"
