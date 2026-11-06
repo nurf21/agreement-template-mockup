@@ -76,7 +76,7 @@ test('publishing does not assign the agreement to anyone', () => {
   const st = fresh();
   const t = create(st);
   const v = publish(st, t);
-  assert.deepEqual(Object.keys(v).sort(), ['content', 'format', 'fromRevision', 'number', 'publishedAt', 'publishedBy', 'title']);
+  assert.deepEqual(Object.keys(v).sort(), ['content', 'format', 'fromRevision', 'number', 'publishedAt', 'publishedBy', 'renderVersion', 'title']);
   assert.deepEqual(Object.keys(st).sort(), ['nextId', 'templates']);
 });
 

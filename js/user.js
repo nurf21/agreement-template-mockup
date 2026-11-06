@@ -63,7 +63,10 @@
       templateCode: t.code,
       templateVersion: v.number,
       title: v.title,
-      ...(json ? { format: RT.FORMAT, formatVersion: v.content.formatVersion, content: RT.freezeCopy(v.content) } : { content: v.content }),
+      // renderVersion: the HTML layout rules used for `html` below (rich text only).
+      ...(json ? {
+        format: RT.FORMAT, formatVersion: v.content.formatVersion, renderVersion: RT.RENDER_VERSION, content: RT.freezeCopy(v.content),
+      } : { content: v.content }),
       values: Object.freeze(values),
       missing: Object.freeze(missing),
       html: missing.length ? null : render(v.content, values),

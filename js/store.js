@@ -7,6 +7,8 @@
  *   records without `format` are Markdown; they are never converted
  *   automatically, only by the explicit convertLegacyDraft action.
  * - Archiving blocks new edits/publications but keeps drafts, versions, history.
+ * - Published rich-text versions record `renderVersion` (the layout rules in
+ *   force when published). Older records without it are left as they are.
  * - Nothing is ever deleted.
  * - Every template carries a `lockVersion` that increases on each successful
  *   save, publication, and archival. Each mutation must name the lockVersion
@@ -202,6 +204,7 @@
       title: t.draft.title,
       format: RT.FORMAT,
       content: RT.freezeCopy(t.draft.content),
+      renderVersion: RT.RENDER_VERSION,
       publishedAt: now,
       publishedBy: actor,
       fromRevision: t.draft.revision,
@@ -324,6 +327,50 @@
     return RT.freezeCopy(RT.wrap(doc));
   }
 
+  /*
+   * Editable sample draft for the label–value table preset. Every company
+   * detail and name is fictional static text (no placeholders, no lookups).
+   */
+  function profileSampleJson() {
+    const text = (s, marks) => ({ type: 'text', text: s, ...(marks ? { marks } : {}) });
+    const para = (s, marks) => ({ type: 'paragraph', content: [text(s, marks)] });
+    const heading = (s) => ({ type: 'heading', attrs: { level: 2 }, content: [text(s)] });
+    const row = (label, ...values) => ({
+      type: 'tableRow',
+      content: [
+        { type: 'tableHeader', content: [para(label)] },
+        { type: 'tableCell', content: values.map((v) => para(v)) },
+      ],
+    });
+    const kv = (...rows) => ({ type: 'table', attrs: { preset: 'labelValue', labelWidth: 25 }, content: rows });
+    return RT.freezeCopy(RT.wrap({
+      type: 'doc',
+      content: [
+        para('Contoh fiktif: seluruh nama perusahaan, alamat, kontak, dan nama orang di dokumen ini rekaan dan dapat diedit.', [{ type: 'italic' }]),
+        heading('Profil Perusahaan'),
+        kv(
+          row('Nama Perusahaan', 'PT Contoh Sinar Fiktif'),
+          row('Alamat Perusahaan', 'Jl. Contoh Raya No. 123, Kelurahan Rekaan, Kota Fiktif 00000'),
+          row('Nomor Telepon', '(000) 1234-5678'),
+          row('Nomor Fax', '(000) 1234-5679'),
+          row('Alamat Email', 'info@contoh-sinar-fiktif.example'),
+          row('Alamat Website', 'https://www.contoh-sinar-fiktif.example/tentang-kami/profil-perusahaan/sejarah-dan-reputasi'),
+          row('Tempat dan Tanggal Berdirinya Perusahaan', 'Kota Fiktif, 1 Januari 2001'),
+          row('Sejarah dan Reputasi Perusahaan',
+            'PT Contoh Sinar Fiktif didirikan sebagai usaha rekaan yang bergerak di bidang layanan administrasi dokumen. Pada tahun-tahun awal, perusahaan fiktif ini melayani pelanggan di satu kota dengan tim kecil yang berfokus pada ketepatan dan kerapian berkas.',
+            'Seiring waktu, perusahaan memperluas layanan ke pengelolaan arsip digital, pelatihan internal, dan pendampingan proses persetujuan dokumen. Setiap perluasan dilakukan bertahap agar mutu layanan tetap terjaga dan pelanggan memperoleh informasi yang jelas sebelum perubahan diterapkan.',
+            'Reputasi perusahaan dalam contoh ini dibangun melalui komitmen pada keterbukaan informasi, waktu tanggap yang konsisten, dan dokumentasi yang mudah dipahami. Paragraf panjang ini sengaja disertakan untuk menunjukkan bahwa teks membungkus otomatis dan tinggi baris tabel bertambah sesuai isinya tanpa terpotong.'),
+        ),
+        heading('Susunan Pengurus Perusahaan'),
+        kv(
+          row('Direktur Utama', 'Andi Contoh'),
+          row('Direktur', 'Sari Contoh'),
+          row('Komisaris', 'Rudi Contoh'),
+        ),
+      ],
+    }));
+  }
+
   function createSeedState() {
     const state = { nextId: 1, templates: [] };
     const add = (t) => {
@@ -405,6 +452,19 @@
         title: 'Ketentuan Dompet', content: CONTENT.dompet1 + '\n3. Poin ketiga (draf).',
         revision: 1, basedOnVersion: 1,
         createdAt: '2026-09-30T02:00:00Z', updatedAt: '2026-09-30T02:00:00Z', updatedBy: 'Siti Rahayu',
+      },
+    });
+    add({
+      code: 'TPL-P5F7NC',
+      internalName: 'Contoh Profil Perusahaan (fiktif)',
+      createdAt: '2026-11-05T02:00:00Z', createdBy: 'Siti Rahayu',
+      updatedAt: '2026-11-05T02:00:00Z',
+      draft: {
+        title: 'Profil Perusahaan (Contoh Fiktif)',
+        format: RT.FORMAT,
+        content: profileSampleJson(),
+        revision: 1, basedOnVersion: null,
+        createdAt: '2026-11-05T02:00:00Z', updatedAt: '2026-11-05T02:00:00Z', updatedBy: 'Siti Rahayu',
       },
     });
     return state;

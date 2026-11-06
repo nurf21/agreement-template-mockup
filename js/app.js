@@ -169,7 +169,7 @@
   }
 
   const formatLabel = (rec) => (S.formatOf(rec) === RT.FORMAT
-    ? `Editor visual (JSON v${rec.content.formatVersion})` : 'Markdown lama');
+    ? `Editor visual (JSON v${rec.content.formatVersion})${rec.renderVersion ? ` · tata letak v${rec.renderVersion}` : ''}` : 'Markdown lama');
 
   /**
    * Document renderer for preview, draft view, and version view. Rich-text
@@ -589,12 +589,13 @@
                 <li>Rata kiri, tengah, kanan (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd>/<kbd>E</kbd>/<kbd>R</kbd>)</li>
                 <li>Daftar berpoin dan bernomor; <kbd>Tab</kbd>/<kbd>Shift</kbd>+<kbd>Tab</kbd> mengubah tingkat butir</li>
                 <li>Tabel dengan baris header; di dalam tabel <kbd>Tab</kbd> berpindah sel</li>
+                <li>Tabel label–nilai: dua kolom tetap (label di kiri, nilai di kanan), baris dapat ditambah/dihapus, lebar kolom label 20%, 25%, atau 30%. Kolom tidak dapat ditambah, dihapus, atau digabung.</li>
                 <li>Urungkan (<kbd>Ctrl</kbd>+<kbd>Z</kbd>) dan ulangi (<kbd>Ctrl</kbd>+<kbd>Y</kbd>)</li>
                 <li>Placeholder hanya dari katalog sistem, tampil sebagai label (mis. “Nama lengkap”). Placeholder dapat disisipkan atau dihapus, tetapi kuncinya tidak dapat diubah.</li>
                 <li><kbd>Esc</kbd> atau <kbd>Alt</kbd>+<kbd>F10</kbd>: pindah ke toolbar. Di toolbar, gunakan tombol panah; <kbd>Esc</kbd> kembali ke isi dokumen.</li>
               </ul>
               <p><strong>Tidak didukung:</strong> gambar, tautan, skrip, gaya/warna, dan sel gabungan. Isi tempelan dibatasi ke format di atas. Nilai placeholder selalu tampil sebagai teks biasa.</p>
-              <p>Isi disimpan sebagai JSON terstruktur (format <code>${RT.FORMAT}</code> versi ${RT.FORMAT_VERSION}). Ukuran maksimal ${RT.LIMITS.contentJson.toLocaleString('id-ID')} karakter JSON; isi tidak pernah dipotong otomatis.</p>
+              <p>Isi disimpan sebagai JSON terstruktur (format <code>${RT.FORMAT}</code> versi ${RT.FORMAT_VERSIONS.join(' atau ')}; versi 2 hanya bila dokumen memuat tabel label–nilai). Ukuran maksimal ${RT.LIMITS.contentJson.toLocaleString('id-ID')} karakter JSON; isi tidak pernah dipotong otomatis.</p>
             </details>
           </div>
           <section class="preview-col" id="preview-col" aria-labelledby="preview-h">
@@ -691,11 +692,14 @@
     bulletList: '<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/>',
     orderedList: '<path d="M10 6h10M10 12h10M10 18h10M4 4h1.5v4M4 8h3M4 14.5c0-1 2.5-1.5 2.5 0S4 17 4 18h3"/>',
     insertTable: '<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9.5h18M3 15h18M9 4v16M15 4v16"/>',
+    insertKvTable: '<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9.5h18M3 15h18M9 4v16"/><path d="M4.5 6.8h3M4.5 12.3h3M4.5 17.6h3" stroke-width="1.4"/>',
   };
   const icon = (k) => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[k]}</svg>`;
 
   const inTable = (ed) => ed.isActive('table');
   const inList = (ed) => ed.isActive('listItem');
+  const inKv = (ed) => ed.isActive('table', { preset: 'labelValue' });
+  const kvWidth = (n) => ({ run: (c) => c.setLabelWidth(n), active: (ed) => ed.isActive('table', { preset: 'labelValue', labelWidth: n }), kv: true });
   // `run` receives a Tiptap chain; `active` (toggle buttons only) sets aria-pressed.
   const COMMANDS = {
     undo: { run: (c) => c.undo() },
@@ -717,16 +721,23 @@
     insertTable: { run: (c) => c.insertTable({ rows: 3, cols: 2, withHeaderRow: true }), block: true },
     addRowAfter: { run: (c) => c.addRowAfter(), table: true },
     deleteRow: { run: (c) => c.deleteRow(), table: true },
-    addColumnAfter: { run: (c) => c.addColumnAfter(), table: true },
-    deleteColumn: { run: (c) => c.deleteColumn(), table: true },
-    toggleHeaderRow: { run: (c) => c.toggleHeaderRow(), active: (ed) => inTable(ed) && ed.isActive('tableHeader'), table: true },
+    // Column and header controls apply to ordinary tables only (`plain`).
+    addColumnAfter: { run: (c) => c.addColumnAfter(), table: true, plain: true },
+    deleteColumn: { run: (c) => c.deleteColumn(), table: true, plain: true },
+    toggleHeaderRow: { run: (c) => c.toggleHeaderRow(), active: (ed) => inTable(ed) && !inKv(ed) && ed.isActive('tableHeader'), table: true, plain: true },
     deleteTable: { run: (c) => c.deleteTable(), table: true },
+    insertKvTable: { run: (c) => c.insertLabelValueTable(), block: true },
+    kvWidth20: kvWidth(20),
+    kvWidth25: kvWidth(25),
+    kvWidth30: kvWidth(30),
   };
 
   function canRun(ed, key) {
     const spec = COMMANDS[key];
     if (spec.block && (inTable(ed) || inList(ed))) return false;
     if (spec.table && !inTable(ed)) return false;
+    if (spec.plain && inKv(ed)) return false;
+    if (spec.kv && !inKv(ed)) return false;
     return spec.run(ed.can().chain()).run();
   }
 
@@ -750,6 +761,8 @@
           tool('addRowAfter', 'Tambah baris di bawah', '+ Baris') + tool('deleteRow', 'Hapus baris', '− Baris') +
           tool('addColumnAfter', 'Tambah kolom di kanan', '+ Kolom') + tool('deleteColumn', 'Hapus kolom', '− Kolom') +
           tool('toggleHeaderRow', 'Baris header', 'Header') + tool('deleteTable', 'Hapus tabel', 'Hapus tabel'))}
+        ${group('Tabel label–nilai', tool('insertKvTable', 'Tabel label–nilai', icon('insertKvTable') + '<span class="tool-text">Tabel label–nilai</span>') +
+          tool('kvWidth20', 'Lebar kolom label 20%', '20%') + tool('kvWidth25', 'Lebar kolom label 25%', '25%') + tool('kvWidth30', 'Lebar kolom label 30%', '30%'))}
         <div class="tool-group" role="group" aria-label="Placeholder">
           <div class="ph-wrap">
             <button type="button" class="tool tool-ph" tabindex="-1" id="ph-btn" data-action="ph-toggle" aria-haspopup="menu" aria-expanded="false" aria-controls="ph-menu">Sisipkan placeholder ▾</button>
@@ -829,6 +842,7 @@
         },
         onTransaction: () => { if (app.editor === e) updateToolbar(); },
         onFocusToolbar: focusToolbar,
+        onRejectPreset: () => toast('Perubahan ditolak: tabel label–nilai harus tetap dua kolom (label dan nilai) tanpa sel gabungan.', 'error'),
       });
       // Adopt the editor's normalized JSON (explicit default attributes) so
       // merely loading a document does not count as an unsaved change.
