@@ -193,23 +193,29 @@ function labelOf(catalogue, key) {
 }
 
 /*
- * Consent clause (“Klausul persetujuan”, format version 3): a top-level block
+ * Consent clause (“Klausul persetujuan”, format version 4): a top-level block
  * holding exactly a plain-text title and explanatory text (paragraphs and
- * lists). Attributes: a system-generated `clauseId` and the boolean
- * `required` (“Wajib dijawab Ya”, on by default). The “Tidak / Ya” options are
- * fixed and only shown, never stored. The document schema allows clauses only
+ * lists). Attributes: a system-generated `clauseId`, the boolean `required`
+ * (“Wajib dijawab”, on by default), and `options`: 2–5 administrator-defined
+ * answers { id (system-generated), label (plain text), qualifies (“Memenuhi
+ * persyaratan”) }. Options are edited in a form below the text (node view);
+ * renaming or reordering keeps IDs. The document schema allows clauses only
  * at the top level, so they cannot be nested in clauses, lists, or tables.
  */
 export const CLAUSE_ID_RE = /^cl_[a-z0-9]{10}$/;
+export const OPTION_ID_RE = /^op_[a-z0-9]{10}$/;
+const OPTION_MIN = 2;
+const OPTION_MAX = 5;
+const LABEL_MAX = 80;
 const ID_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789';
 
-function newClauseId(taken) {
+function newId(prefix, taken) {
   for (;;) {
     const bytes = new Uint8Array(10);
     if (globalThis.crypto && globalThis.crypto.getRandomValues) globalThis.crypto.getRandomValues(bytes);
     else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
-    const id = 'cl_' + Array.from(bytes, (b) => ID_CHARS[b % ID_CHARS.length]).join('');
-    if (!taken.has(id)) return id;
+    const id = prefix + '_' + Array.from(bytes, (b) => ID_CHARS[b % ID_CHARS.length]).join('');
+    if (!taken.has(id)) { taken.add(id); return id; }
   }
 }
 
@@ -217,6 +223,26 @@ function clauseIdsIn(doc) {
   const ids = new Set();
   doc.forEach((n) => { if (n.type.name === 'consentClause' && n.attrs.clauseId) ids.add(n.attrs.clauseId); });
   return ids;
+}
+
+function optionIdsIn(doc) {
+  const ids = new Set();
+  doc.forEach((n) => { if (n.type.name === 'consentClause' && Array.isArray(n.attrs.options)) n.attrs.options.forEach((o) => ids.add(o.id)); });
+  return ids;
+}
+
+const emptyOption = (taken) => ({ id: newId('op', taken), label: '', qualifies: false });
+
+/** Options from pasted/serialized HTML: shape only (validated again on save); null if unusable. */
+function parseOptions(raw) {
+  let list;
+  try { list = JSON.parse(raw || ''); } catch (_) { return null; }
+  if (!Array.isArray(list) || !list.length || list.length > 20) return null;
+  return list.map((o) => ({
+    id: o && typeof o.id === 'string' ? o.id : '',
+    label: o && typeof o.label === 'string' ? o.label.slice(0, 200) : '',
+    qualifies: Boolean(o && o.qualifies === true),
+  }));
 }
 
 const ClauseTitle = Node.create({
@@ -236,6 +262,187 @@ const ClauseBody = Node.create({
   renderHTML: () => ['div', { 'data-clause-body': '', class: 'clause-edit-body' }, 0],
 });
 
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  Object.entries(attrs || {}).forEach(([k, v]) => { if (v != null && v !== false) el.setAttribute(k, v === true ? '' : String(v)); });
+  kids.forEach((k) => el.append(k));
+  return el;
+}
+
+/**
+ * Editing view of a clause: read-only head (kind, required state, ID), the
+ * editable title/text (contentDOM), and a form for the answer options:
+ * label inputs, “Memenuhi persyaratan” checkboxes (required clauses only),
+ * move up/down, remove, and add. Every change is one editor transaction
+ * (undoable). `issuesOf(options, required)` gives inline messages (the same
+ * rules as js/richtext.js).
+ */
+class ClauseView {
+  constructor(node, getPos, editor, issuesOf) {
+    this.node = node;
+    this.getPos = getPos;
+    this.editor = editor;
+    this.issuesOf = issuesOf;
+    this.key = null;
+    this.focusAfter = null;
+    this.tagEl = h('span', { class: 'clause-edit-tag' }, 'Klausul persetujuan');
+    this.reqEl = h('span', { class: 'clause-edit-req' });
+    this.idEl = h('span', { class: 'clause-edit-id' });
+    this.head = h('div', { class: 'clause-edit-head', contenteditable: 'false' }, this.tagEl, this.reqEl, this.idEl);
+    this.contentDOM = h('div', { class: 'clause-edit-content' });
+    this.list = h('ol', { class: 'clause-opts' });
+    this.addBtn = h('button', { type: 'button', class: 'clause-opt-add', 'data-role': 'add' }, '+ Tambah pilihan');
+    this.hint = h('p', { class: 'clause-opts-hint' });
+    this.clauseErr = h('p', { class: 'clause-opts-err' });
+    this.legend = h('p', { class: 'clause-opts-h' }, 'Pilihan jawaban');
+    this.panel = h('div', { class: 'clause-edit-options', contenteditable: 'false', role: 'group' },
+      this.legend, this.hint, this.list, this.addBtn, this.clauseErr);
+    this.dom = h('section', { class: 'clause-edit' }, this.head, this.contentDOM, this.panel);
+    this.panel.addEventListener('input', (ev) => this.onInput(ev));
+    this.panel.addEventListener('change', (ev) => this.onChange(ev));
+    this.panel.addEventListener('click', (ev) => this.onClick(ev));
+    // Enter in a label must not submit the surrounding form.
+    this.panel.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && ev.target.matches('input')) ev.preventDefault(); });
+    this.render();
+  }
+
+  get options() { return Array.isArray(this.node.attrs.options) ? this.node.attrs.options : []; }
+
+  setOptions(next, focusAfter) {
+    const pos = this.getPos();
+    if (typeof pos !== 'number') return;
+    this.focusAfter = focusAfter || null;
+    this.editor.view.dispatch(this.editor.state.tr.setNodeMarkup(pos, undefined, { ...this.node.attrs, options: next }));
+  }
+
+  rowOf(el) {
+    const li = el.closest('li[data-option-id]');
+    const index = li ? this.options.findIndex((o) => o.id === li.dataset.optionId) : -1;
+    return index < 0 ? null : index;
+  }
+
+  onInput(ev) {
+    const i = this.rowOf(ev.target);
+    if (i == null || ev.target.dataset.role !== 'label') return;
+    const next = this.options.map((o, j) => (j === i ? { ...o, label: ev.target.value } : o));
+    this.setOptions(next);
+  }
+
+  onChange(ev) {
+    const i = this.rowOf(ev.target);
+    if (i == null) return;
+    const o = this.options[i];
+    if (ev.target.dataset.role === 'label' && ev.target.value.trim() !== ev.target.value) {
+      this.setOptions(this.options.map((x, j) => (j === i ? { ...x, label: ev.target.value.trim() } : x)));
+    } else if (ev.target.dataset.role === 'qualifies' && ev.target.checked !== o.qualifies) {
+      this.setOptions(this.options.map((x, j) => (j === i ? { ...x, qualifies: ev.target.checked } : x)), { id: o.id, role: 'qualifies' });
+    }
+  }
+
+  onClick(ev) {
+    const btn = ev.target.closest('button');
+    if (!btn || btn.disabled) return;
+    const opts = this.options.slice();
+    const role = btn.dataset.role;
+    if (role === 'add') {
+      if (opts.length >= OPTION_MAX) return;
+      const o = emptyOption(optionIdsIn(this.editor.state.doc));
+      this.setOptions(opts.concat(o), { id: o.id, role: 'label' });
+      return;
+    }
+    const i = this.rowOf(btn);
+    if (i == null) return;
+    const id = opts[i].id;
+    if (role === 'remove' && opts.length > OPTION_MIN) {
+      opts.splice(i, 1);
+      const next = opts[i] || opts[i - 1];
+      this.setOptions(opts, { id: next.id, role: 'remove', fallback: 'label' });
+    } else if (role === 'up' && i > 0) {
+      [opts[i - 1], opts[i]] = [opts[i], opts[i - 1]];
+      this.setOptions(opts, { id, role: 'up', fallback: 'down' });
+    } else if (role === 'down' && i < opts.length - 1) {
+      [opts[i + 1], opts[i]] = [opts[i], opts[i + 1]];
+      this.setOptions(opts, { id, role: 'down', fallback: 'up' });
+    }
+  }
+
+  render() {
+    const { clauseId, required } = this.node.attrs;
+    const opts = this.options;
+    this.dom.className = 'clause-edit' + (required ? ' clause-required' : '');
+    this.reqEl.textContent = required ? 'Wajib dijawab' : 'Opsional';
+    this.idEl.textContent = `ID ${clauseId || '(baru)'}`;
+    const base = 'ed-' + (clauseId || 'baru');
+    this.legend.id = base + '-opts-h';
+    this.hint.id = base + '-opts-hint';
+    this.panel.setAttribute('aria-labelledby', this.legend.id);
+    this.hint.textContent = required
+      ? `${OPTION_MIN}–${OPTION_MAX} pilihan; pengguna memilih tepat satu, tanpa pilihan bawaan. Hanya pilihan bertanda “Memenuhi persyaratan” yang memungkinkan persetujuan; arti pilihan tidak ditentukan dari labelnya.`
+      : `${OPTION_MIN}–${OPTION_MAX} pilihan; pengguna memilih tepat satu atau tidak menjawab. Klausul opsional: pilihan apa pun dicatat tanpa menghalangi persetujuan.`;
+
+    const key = JSON.stringify([clauseId, required, opts.map((o) => o.id)]);
+    if (key !== this.key) {
+      this.key = key;
+      this.list.replaceChildren(...opts.map((o, i) => {
+        const id = `${base}-${o.id}`;
+        const n = i + 1;
+        const btn = (role, label, text) => h('button', { type: 'button', class: 'clause-opt-btn', 'data-role': role, 'aria-label': `${label} pilihan ${n}`, title: `${label} pilihan ${n}` }, text);
+        return h('li', { class: 'clause-opt', 'data-option-id': o.id },
+          h('label', { class: 'clause-opt-lab', for: id + '-label' }, `Pilihan ${n}`),
+          h('input', { type: 'text', id: id + '-label', class: 'clause-opt-input', 'data-role': 'label', maxlength: String(LABEL_MAX + 20), autocomplete: 'off', 'aria-describedby': id + '-err' }),
+          required ? h('label', { class: 'clause-opt-q', for: id + '-q' },
+            h('input', { type: 'checkbox', id: id + '-q', 'data-role': 'qualifies', 'aria-describedby': this.hint.id || null }), ' Memenuhi persyaratan') : '',
+          h('span', { class: 'clause-opt-actions' },
+            btn('up', 'Naikkan', '↑'), btn('down', 'Turunkan', '↓'), btn('remove', 'Hapus', 'Hapus')),
+          h('p', { class: 'clause-opt-err', id: id + '-err' }));
+      }));
+    }
+    // Sync values in place, so typing never loses focus.
+    const issues = this.issuesOf(opts, required) || [];
+    this.list.querySelectorAll('li[data-option-id]').forEach((li, i) => {
+      const o = opts[i];
+      const input = li.querySelector('[data-role="label"]');
+      if (input.value !== o.label && input.ownerDocument.activeElement !== input) input.value = o.label;
+      const q = li.querySelector('[data-role="qualifies"]');
+      if (q) q.checked = o.qualifies === true;
+      const msgs = issues.filter((x) => x.index === i && x.message).map((x) => x.message);
+      li.querySelector('.clause-opt-err').textContent = msgs.join(' ');
+      input.setAttribute('aria-invalid', String(msgs.length > 0));
+      li.querySelector('[data-role="up"]').disabled = i === 0;
+      li.querySelector('[data-role="down"]').disabled = i === opts.length - 1;
+      li.querySelector('[data-role="remove"]').disabled = opts.length <= OPTION_MIN;
+    });
+    this.addBtn.disabled = opts.length >= OPTION_MAX;
+    this.addBtn.textContent = opts.length >= OPTION_MAX ? `Maksimal ${OPTION_MAX} pilihan` : '+ Tambah pilihan';
+    this.clauseErr.textContent = issues.filter((x) => x.index == null && x.message).map((x) => x.message).join(' ');
+    this.restoreFocus();
+  }
+
+  restoreFocus() {
+    const f = this.focusAfter;
+    this.focusAfter = null;
+    if (!f) return;
+    const li = this.list.querySelector(`li[data-option-id="${f.id}"]`);
+    const pick = (role) => (li ? li.querySelector(`[data-role="${role}"]`) : null);
+    let el = pick(f.role);
+    if (!el || el.disabled) el = pick(f.fallback);
+    if (!el || el.disabled) el = pick('label') || this.addBtn;
+    el.focus();
+  }
+
+  update(node) {
+    if (node.type !== this.node.type) return false;
+    this.node = node;
+    this.render();
+    return true;
+  }
+
+  // Events in the head and the options form belong to the form controls, not ProseMirror.
+  stopEvent(ev) { return !this.contentDOM.contains(ev.target); }
+
+  ignoreMutation(m) { return !this.contentDOM.contains(m.target); }
+}
+
 const ConsentClause = Node.create({
   name: 'consentClause',
   group: 'block',
@@ -243,6 +450,10 @@ const ConsentClause = Node.create({
   isolating: true,
   defining: true,
   draggable: false,
+
+  addOptions() {
+    return { optionIssues: () => [] };
+  },
 
   addAttributes() {
     return {
@@ -259,30 +470,41 @@ const ConsentClause = Node.create({
         parseHTML: (el) => el.getAttribute('data-required') !== 'false',
         renderHTML: (attrs) => ({ 'data-required': String(attrs.required) }),
       },
+      options: {
+        default: null,
+        parseHTML: (el) => parseOptions(el.getAttribute('data-options')),
+        renderHTML: (attrs) => (Array.isArray(attrs.options) ? { 'data-options': JSON.stringify(attrs.options) } : {}),
+      },
     };
   },
 
   parseHTML: () => [{ tag: 'section[data-clause-id]', contentElement: '.clause-edit-content' }],
 
+  // Serialized form (clipboard); the editor itself shows ClauseView.
   renderHTML({ node, HTMLAttributes }) {
     const req = node.attrs.required;
+    const opts = Array.isArray(node.attrs.options) ? node.attrs.options : [];
     return ['section', mergeAttributes(HTMLAttributes, { class: 'clause-edit' + (req ? ' clause-required' : '') }),
       ['div', { class: 'clause-edit-head', contenteditable: 'false' },
         ['span', { class: 'clause-edit-tag' }, 'Klausul persetujuan'],
-        ['span', { class: 'clause-edit-req' }, req ? 'Wajib dijawab Ya' : 'Opsional'],
-        ['span', { class: 'clause-edit-id' }, `ID ${node.attrs.clauseId || '(baru)'}`]],
+        ['span', { class: 'clause-edit-req' }, req ? 'Wajib dijawab' : 'Opsional']],
       ['div', { class: 'clause-edit-content' }, 0],
-      ['div', { class: 'clause-edit-options', contenteditable: 'false' },
-        'Pilihan jawaban (tetap): ', ['span', { class: 'clause-edit-radio' }, 'Tidak'], ['span', { class: 'clause-edit-radio' }, 'Ya']]];
+      ['ul', { class: 'clause-edit-options', contenteditable: 'false' }, ...opts.map((o) => ['li', {}, o.label])]];
+  },
+
+  addNodeView() {
+    const issuesOf = this.options.optionIssues;
+    return ({ node, getPos, editor }) => new ClauseView(node, getPos, editor, issuesOf);
   },
 
   addCommands() {
     return {
       insertConsentClause: () => ({ tr, dispatch, editor, state }) => {
         if (findParentNode((n) => n.type.name === 'consentClause')(state.selection)) return false;
+        const takenOpts = optionIdsIn(state.doc);
         const node = editor.schema.nodeFromJSON({
           type: 'consentClause',
-          attrs: { clauseId: newClauseId(clauseIdsIn(state.doc)), required: true },
+          attrs: { clauseId: newId('cl', clauseIdsIn(state.doc)), required: true, options: [emptyOption(takenOpts), emptyOption(takenOpts)] },
           content: [{ type: 'clauseTitle' }, { type: 'clauseBody', content: [{ type: 'paragraph' }] }],
         });
         if (dispatch) {
@@ -311,7 +533,9 @@ const ConsentClause = Node.create({
     return [
       // Stable, unique IDs: a clause keeps its ID unless another clause in the
       // document already owns it (e.g. after copy-paste duplication), in which
-      // case the newcomer gets a fresh ID. Missing or invalid IDs are replaced.
+      // case the newcomer gets a fresh clause ID and fresh option IDs. Missing,
+      // invalid, or duplicate option IDs are replaced; a clause without usable
+      // options gets two empty ones. Renaming or reordering keeps IDs.
       new Plugin({
         key: new PluginKey('clauseIds'),
         appendTransaction: (trs, oldState, newState) => {
@@ -325,23 +549,37 @@ const ConsentClause = Node.create({
             if (!gone) owners.set(n.attrs.clauseId, pos);
           });
           const taken = clauseIdsIn(newState.doc);
+          const takenOpts = optionIdsIn(newState.doc);
           const seen = new Set();
+          const seenOpts = new Set();
           const fixes = [];
           newState.doc.forEach((n, pos) => {
             if (n.type.name !== 'consentClause') return;
             const id = n.attrs.clauseId;
             const owner = owners.get(id);
             const ownedElsewhere = owner !== undefined && owner !== pos && newState.doc.nodeAt(owner)?.attrs.clauseId === id;
-            if (!CLAUSE_ID_RE.test(id || '') || seen.has(id) || ownedElsewhere) fixes.push(pos);
-            else seen.add(id);
+            const fresh = !CLAUSE_ID_RE.test(id || '') || seen.has(id) || ownedElsewhere;
+            if (!fresh) seen.add(id);
+            const attrs = { ...n.attrs };
+            let changed = false;
+            if (fresh) { attrs.clauseId = newId('cl', taken); changed = true; }
+            if (!Array.isArray(attrs.options) || !attrs.options.length) {
+              attrs.options = [emptyOption(takenOpts), emptyOption(takenOpts)];
+              changed = true;
+            } else {
+              attrs.options = attrs.options.map((o) => {
+                if (!fresh && OPTION_ID_RE.test(o.id || '') && !seenOpts.has(o.id)) { seenOpts.add(o.id); return o; }
+                changed = true;
+                const copy = { ...o, id: newId('op', takenOpts) };
+                seenOpts.add(copy.id);
+                return copy;
+              });
+            }
+            if (changed) fixes.push([pos, attrs]);
           });
           if (!fixes.length) return null;
           const tr = newState.tr;
-          fixes.forEach((pos) => {
-            const id = newClauseId(taken);
-            taken.add(id);
-            tr.setNodeMarkup(pos, undefined, { ...newState.doc.nodeAt(pos).attrs, clauseId: id });
-          });
+          fixes.forEach(([pos, attrs]) => tr.setNodeMarkup(pos, undefined, attrs));
           return tr.setMeta('addToHistory', false);
         },
       }),
@@ -412,7 +650,7 @@ export function createEditor(opts) {
       PlainHeader,
       PlainCell,
       Variable.configure({ catalogue: opts.catalogue }),
-      ConsentClause,
+      ConsentClause.configure({ optionIssues: opts.optionIssues || (() => []) }),
       ClauseTitle,
       ClauseBody,
       ClauseTitleEnter,

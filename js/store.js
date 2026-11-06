@@ -9,6 +9,10 @@
  * - Archiving blocks new edits/publications but keeps drafts, versions, history.
  * - Published rich-text versions record `renderVersion` (the layout rules in
  *   force when published). Older records without it are left as they are.
+ * - Consent clauses with fixed “Tidak / Ya” options (rich-text format 3) stay
+ *   readable in versions, drafts, and snapshots, but new content cannot be
+ *   saved or published with them. They become configurable options only
+ *   through the explicit convertLegacyDraft action (a new editable draft).
  * - Nothing is ever deleted.
  * - Every template carries a `lockVersion` that increases on each successful
  *   save, publication, and archival. Each mutation must name the lockVersion
@@ -43,6 +47,20 @@
     }
     throw new StoreError('CODE_EXHAUSTED', 'Tidak dapat membuat kode unik.');
   }
+
+  const ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
+
+  /** Random system ID `<prefix>_` + 10 characters, not in `taken` (a Set, updated). */
+  function generateId(prefix, taken, rand) {
+    const random = rand || Math.random;
+    for (;;) {
+      let id = prefix + '_';
+      for (let i = 0; i < 10; i++) id += ID_ALPHABET[Math.floor(random() * ID_ALPHABET.length)];
+      if (!taken.has(id)) { taken.add(id); return id; }
+    }
+  }
+
+  const FIXED_CLAUSES_MESSAGE = 'Dokumen memuat klausul persetujuan dengan pilihan tetap “Tidak / Ya” (format lama). Buat draf baru dengan pilihan yang dapat diatur melalui konversi eksplisit.';
 
   function statusOf(t) {
     if (t.archived) return 'archived';
@@ -130,6 +148,7 @@
       content: input.content,
     };
     const errors = RT.validateDraft(fields);
+    if (!errors.length && RT.fixedClauseCount(fields.content)) errors.push({ field: 'content', kind: 'format', message: FIXED_CLAUSES_MESSAGE });
     if (errors.length) throw new StoreError('INVALID', 'Draf tidak valid.', { errors });
 
     let t;
@@ -162,29 +181,45 @@
     return t;
   }
 
+  /** What kind of explicit conversion a draft/version needs before editing, or null. */
+  function legacyKind(record) {
+    if (!record) return null;
+    if (formatOf(record) === 'markdown') return 'markdown';
+    return RT.fixedClauseCount(record.content) ? 'fixed-clauses' : null;
+  }
+
   /**
-   * Explicit, admin-initiated conversion of legacy Markdown into a new
-   * rich-text draft. Source: the Markdown draft if there is one, otherwise the
+   * Explicit, admin-initiated conversion into a new editable rich-text draft
+   * of either legacy Markdown or fixed “Tidak / Ya” consent clauses (format 3:
+   * each becomes the options “Tidak” and “Ya” with new option IDs, “Ya”
+   * qualifying, as before). Source: the draft if there is one, otherwise the
    * latest published version (which stays unchanged). Nothing is saved unless
-   * the whole document converts faithfully.
+   * the whole document converts and validates.
    */
-  function convertLegacyDraft(state, id, expectedLockVersion, actor, now) {
+  function convertLegacyDraft(state, id, expectedLockVersion, actor, now, rand) {
     const t = requireTemplate(state, id);
     if (t.archived) throw new StoreError('ARCHIVED', 'Template diarsipkan dan tidak dapat diedit.');
     assertLock(t, expectedLockVersion);
     const latest = latestVersion(t);
     const source = t.draft || latest;
-    if (!source || formatOf(source) !== 'markdown') {
-      throw new StoreError('NOT_LEGACY', 'Tidak ada dokumen Markdown lama untuk dikonversi.');
+    const kind = legacyKind(source);
+    if (!kind) throw new StoreError('NOT_LEGACY', 'Tidak ada dokumen lama untuk dikonversi.');
+    let content;
+    if (kind === 'markdown') {
+      const res = RT.convertMarkdown(source.content);
+      if (!res.ok) {
+        throw new StoreError('CONVERSION_FAILED', 'Dokumen tidak dapat dikonversi tanpa mengubah isinya.', { errors: res.errors });
+      }
+      content = res.content;
+    } else {
+      const taken = new Set();
+      content = RT.convertFixedClauses(source.content, () => generateId('op', taken, rand));
+      const issues = RT.contentIssues(content);
+      if (issues.length) throw new StoreError('CONVERSION_FAILED', 'Dokumen tidak dapat dikonversi.', { errors: issues.map((i) => i.message) });
     }
-    const res = RT.convertMarkdown(source.content);
-    if (!res.ok) {
-      throw new StoreError('CONVERSION_FAILED', 'Dokumen tidak dapat dikonversi tanpa mengubah isinya.', { errors: res.errors });
-    }
-    const convertedFrom = t.draft
-      ? { format: 'markdown', draftRevision: t.draft.revision }
-      : { format: 'markdown', version: latest.number };
-    writeDraft(t, t.draft, { title: source.title, content: res.content }, actor, now, { convertedFrom });
+    const from = kind === 'markdown' ? { format: 'markdown' } : { format: RT.FORMAT, formatVersion: source.content.formatVersion, clauses: 'fixed' };
+    const convertedFrom = t.draft ? { ...from, draftRevision: t.draft.revision } : { ...from, version: latest.number };
+    writeDraft(t, t.draft, { title: source.title, content }, actor, now, { convertedFrom });
     return t;
   }
 
@@ -196,6 +231,7 @@
     if (formatOf(t.draft) !== RT.FORMAT) {
       throw new StoreError('LEGACY_FORMAT', 'Draf Markdown lama harus dikonversi ke editor visual sebelum diterbitkan.');
     }
+    if (RT.fixedClauseCount(t.draft.content)) throw new StoreError('LEGACY_FORMAT', FIXED_CLAUSES_MESSAGE);
     const errors = validateRecord(t.internalName, t.draft);
     if (errors.length) throw new StoreError('INVALID', 'Draf belum dapat diterbitkan.', { errors });
 
@@ -344,9 +380,10 @@
       ],
     });
     const kv = (...rows) => ({ type: 'table', attrs: { preset: 'labelValue', labelWidth: 25 }, content: rows });
-    // Consent clauses: fixed sample IDs; answers are always “Tidak” / “Ya”.
-    const clause = (clauseId, required, title, ...body) => ({
-      type: 'consentClause', attrs: { clauseId, required },
+    // Consent clauses: fixed sample IDs; options [id, label, qualifies].
+    const clause = (clauseId, required, options, title, ...body) => ({
+      type: 'consentClause',
+      attrs: { clauseId, required, options: options.map(([id, label, qualifies]) => ({ id, label, qualifies })) },
       content: [{ type: 'clauseTitle', content: [text(title)] }, { type: 'clauseBody', content: body.map((x) => para(x)) }],
     });
     return RT.freezeCopy(RT.wrap({
@@ -373,9 +410,17 @@
           row('Direktur', 'Sari Contoh'),
           row('Komisaris', 'Rudi Contoh'),
         ),
-        clause('cl_bacaprofil', true, 'Pernyataan telah membaca profil perusahaan',
-          'Dengan memilih “Ya”, saya menyatakan telah membaca dan memahami profil perusahaan di atas, termasuk susunan pengurus perusahaan. (Contoh fiktif.)'),
-        clause('cl_infolanjut', false, 'Kesediaan menerima informasi lanjutan',
+        clause('cl_bacaprofil', true, [['op_sudahbaca1', 'Sudah membaca', true], ['op_belumbaca1', 'Belum membaca', false]],
+          'Pernyataan telah membaca profil perusahaan',
+          'Nyatakan apakah Anda telah membaca dan memahami profil perusahaan di atas, termasuk susunan pengurus perusahaan. (Contoh fiktif.)'),
+        clause('cl_risikolyn1', true, [
+          ['op_terima0001', 'Memahami dan menerima', true],
+          ['op_konsul0001', 'Memahami, akan berkonsultasi dahulu', true],
+          ['op_belumpaham', 'Belum memahami', false],
+        ], 'Pemahaman ketentuan layanan',
+          'Dua pilihan pertama memenuhi persyaratan; “Belum memahami” tidak. (Contoh fiktif.)'),
+        clause('cl_infolanjut', false, [['op_bersedia01', 'Bersedia', false], ['op_tdksedia01', 'Tidak bersedia', false]],
+          'Kesediaan menerima informasi lanjutan',
           'Pilihan ini opsional dan tidak memengaruhi persetujuan dokumen. (Contoh fiktif.)'),
       ],
     }));
@@ -481,7 +526,7 @@
   }
 
   const api = {
-    StoreError, generateCode, statusOf, latestVersion, getTemplate, assertLock, formatOf, validateRecord,
+    StoreError, generateCode, generateId, legacyKind, statusOf, latestVersion, getTemplate, assertLock, formatOf, validateRecord,
     saveDraft, convertLegacyDraft, publishDraft, archiveTemplate, simulateExternalEdit, createSeedState,
   };
   if (typeof module === 'object' && module.exports) module.exports = api;
