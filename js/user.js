@@ -10,12 +10,15 @@
  *   Drafts are never assigned. Existing snapshots stay readable after archival.
  * - Acceptance is bound to the user and the snapshot. Accepting twice returns
  *   the original record; it is never duplicated or re-timestamped.
- * - Consent clauses (rich-text format 3) are frozen into the snapshot as
- *   `clauses` (ID, title, required, in document order). An acceptance of a
- *   snapshot with clauses records `answers` keyed by clause ID ('ya',
- *   'tidak', or null for an unanswered optional clause). A required clause
- *   must be answered 'ya'. Snapshots without clauses, and acceptances made
- *   before clauses existed, have neither field; nothing is invented for them.
+ * - Consent clauses are frozen into the snapshot as `clauses` (ID, title,
+ *   required, in document order; format 4 adds `options`: ID, label,
+ *   qualifies, in order). An acceptance of a snapshot with clauses records
+ *   `answers` keyed by clause ID: the selected option ID, or null for an
+ *   unanswered optional clause. Labels are never used as identifiers. A
+ *   required clause needs a qualifying option. Format-3 snapshots keep their
+ *   fixed options ('tidak' / 'ya'; only 'ya' qualifies). Snapshots without
+ *   clauses, and acceptances made before clauses existed, have neither field;
+ *   nothing is invented for them.
  */
 (function (root) {
   'use strict';
@@ -136,12 +139,20 @@
     return ownAssignments(state).map((a) => ({ assignment: a, acceptance: acceptanceFor(state, a) }));
   }
 
-  const ANSWER_VALUES = RT.CLAUSE_ANSWERS.map((x) => x.value);
   const clausesOfSnapshot = (s) => s.clauses || [];
+  const optionOf = (c, id) => RT.clauseOptions(c).find((o) => o.id === id) || null;
+
+  /** Label of an answer, from the snapshot's frozen options. */
+  function answerLabel(clause, value) {
+    if (value == null) return 'Tidak dijawab';
+    const o = optionOf(clause, value);
+    return o ? o.label : String(value);
+  }
 
   /**
    * Answers for every clause of the snapshot, in clause order, with `null`
-   * for unanswered ones. Unknown clause IDs or values are refused.
+   * for unanswered ones. Unknown clause IDs and option IDs that do not belong
+   * to that clause are refused.
    */
   function normalizeAnswers(snapshot, answers) {
     const given = answers == null ? {} : answers;
@@ -152,20 +163,30 @@
     const out = {};
     clauses.forEach((c) => {
       const v = given[c.id] == null ? null : given[c.id];
-      if (v !== null && !ANSWER_VALUES.includes(v)) throw new StoreError('INVALID', `Jawaban klausul “${c.title}” tidak valid.`);
+      if (v !== null && !optionOf(c, v)) throw new StoreError('INVALID', `Jawaban klausul “${c.title}” tidak valid.`);
       out[c.id] = v;
     });
     return out;
   }
 
-  /** Required clauses not answered “Ya”, each with a message naming the clause. */
+  /**
+   * Required clauses without a qualifying answer, each with a message naming
+   * the clause, the current answer, and the qualifying options. Optional
+   * clauses never block. `answer` is the selected option ID or null.
+   */
   function clauseIssues(snapshot, answers) {
     const given = answers || {};
-    return clausesOfSnapshot(snapshot).filter((c) => c.required && given[c.id] !== 'ya').map((c) => {
+    return clausesOfSnapshot(snapshot).filter((c) => {
+      const o = c.required ? optionOf(c, given[c.id]) : null;
+      return c.required && !(o && o.qualifies);
+    }).map((c) => {
       const answer = given[c.id] == null ? null : given[c.id];
+      const accepted = RT.labelList(RT.clauseOptions(c).filter((o) => o.qualifies).map((o) => o.label));
       return {
-        clauseId: c.id, title: c.title, answer,
-        message: `Klausul “${c.title}” wajib dijawab “Ya” (${answer === 'tidak' ? 'jawaban saat ini: Tidak' : 'belum dijawab'}).`,
+        clauseId: c.id, title: c.title, answer, accepted,
+        message: answer == null
+          ? `Klausul “${c.title}” wajib dijawab (belum dijawab). Pilih ${accepted}.`
+          : `Klausul “${c.title}”: jawaban saat ini “${answerLabel(c, answer)}” tidak memenuhi persyaratan. Pilih ${accepted}.`,
       };
     });
   }
@@ -178,7 +199,7 @@
    *
    * `review` = { snapshotId, answers }: the snapshot and clause answers the
    * user confirmed. A different snapshot ID is refused (STALE). For snapshots
-   * with clauses, every required clause must be answered 'ya'.
+   * with clauses, every required clause needs a qualifying option.
    */
   function acceptAssignment(state, assignmentId, now, review) {
     const a = getAssignment(state, assignmentId);
@@ -240,7 +261,7 @@
 
   const api = {
     SIM_USER_ID, PROFILE_PRESETS, placeholdersIn, setProfile, assignVersion, getAssignment,
-    acceptanceFor, listForUser, acceptAssignment, emptyUserState, createSeedUserState, normalizeAnswers, clauseIssues,
+    acceptanceFor, listForUser, acceptAssignment, emptyUserState, createSeedUserState, normalizeAnswers, clauseIssues, answerLabel,
   };
   if (node) module.exports = api;
   else root.AgreementUser = api;

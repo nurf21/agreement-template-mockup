@@ -343,12 +343,13 @@
       const editLabel = t.draft ? 'Lanjutkan edit draf'
         : (latest ? `Edit (buat draf dari Versi ${latest.number})` : 'Edit draf');
       actions.push(button(editLabel, { href: `#/t/${t.id}/edit`, primary: true, allowed: app.perms.edit, reason: 'Memerlukan izin Edit' }));
-      const legacyDraft = t.draft && S.formatOf(t.draft) !== RT.FORMAT;
+      const legacyDraft = t.draft ? S.legacyKind(t.draft) : null;
       actions.push(button('Terbitkan draf…', {
         action: 'publish', id: t.id, lock: t.lockVersion,
         allowed: app.perms.publish && Boolean(t.draft) && !legacyDraft,
         reason: !app.perms.publish ? 'Memerlukan izin Terbitkan/Arsipkan'
-          : (legacyDraft ? 'Draf Markdown lama harus dikonversi ke editor visual terlebih dahulu' : 'Tidak ada draf untuk diterbitkan'),
+          : (legacyDraft === 'markdown' ? 'Draf Markdown lama harus dikonversi ke editor visual terlebih dahulu'
+            : legacyDraft ? 'Draf dengan klausul “Tidak / Ya” lama harus dikonversi terlebih dahulu' : 'Tidak ada draf untuk diterbitkan'),
       }));
       actions.push(button('Arsipkan…', { action: 'archive', id: t.id, lock: t.lockVersion, allowed: app.perms.publish, danger: true, reason: 'Memerlukan izin Terbitkan/Arsipkan' }));
     }
@@ -375,7 +376,7 @@
       doc = documentHtml(latest.title, latest);
     } else {
       const d = t.draft;
-      meta = `<strong>Draf revisi ${d.revision}</strong> · ${d.basedOnVersion ? `disalin dari Versi ${d.basedOnVersion}` : 'belum pernah diterbitkan'} · diperbarui ${timeTag(d.updatedAt)} oleh ${esc(d.updatedBy)} · format ${esc(formatLabel(d))}${d.convertedFrom ? ` · dikonversi dari Markdown ${d.convertedFrom.version ? `Versi ${d.convertedFrom.version}` : `draf revisi ${d.convertedFrom.draftRevision}`}` : ''}`;
+      meta = `<strong>Draf revisi ${d.revision}</strong> · ${d.basedOnVersion ? `disalin dari Versi ${d.basedOnVersion}` : 'belum pernah diterbitkan'} · diperbarui ${timeTag(d.updatedAt)} oleh ${esc(d.updatedBy)} · format ${esc(formatLabel(d))}${d.convertedFrom ? ` · dikonversi dari ${d.convertedFrom.format === 'markdown' ? 'Markdown' : 'klausul “Tidak / Ya” lama'} ${d.convertedFrom.version ? `Versi ${d.convertedFrom.version}` : `draf revisi ${d.convertedFrom.draftRevision}`}` : ''}`;
       doc = documentHtml(d.title, d);
     }
 
@@ -458,7 +459,7 @@
         </div>
       </div>
       <div class="callout callout-muted" role="note"><p>Versi terbit bersifat hanya baca. Judul dan isinya dibekukan saat diterbitkan.
-        Format: ${esc(formatLabel(v))}.${S.formatOf(v) === 'markdown' ? ' Versi ini ditampilkan dengan renderer Markdown aslinya dan tidak dikonversi otomatis.' : ''}</p></div>
+        Format: ${esc(formatLabel(v))}.${S.formatOf(v) === 'markdown' ? ' Versi ini ditampilkan dengan renderer Markdown aslinya dan tidak dikonversi otomatis.' : ''}${S.legacyKind(v) === 'fixed-clauses' ? ' Klausul versi ini memakai pilihan tetap “Tidak / Ya” (wajib dijawab “Ya”) dan tidak dikonversi otomatis.' : ''}</p></div>
       <section class="doc-panel doc-panel-solo" aria-label="Dokumen Versi ${v.number}">
         <div class="doc-toolbar"><span></span>${valuesToggle()}</div>
         ${documentHtml(v.title, v)}
@@ -485,9 +486,11 @@
     }
     const latest = S.latestVersion(t);
     const src = t.draft || latest;
-    // Legacy Markdown is never opened in the visual editor; the admin converts it explicitly.
-    const legacy = src && S.formatOf(src) === 'markdown'
-      ? { draft: Boolean(t.draft), label: t.draft ? `Draf revisi ${t.draft.revision}` : `Versi ${latest.number}` }
+    // Legacy Markdown and fixed “Tidak / Ya” clauses are never opened in the
+    // visual editor; the admin converts them explicitly into a new draft.
+    const kind = S.legacyKind(src);
+    const legacy = kind
+      ? { kind, draft: Boolean(t.draft), label: t.draft ? `Draf revisi ${t.draft.revision}` : `Versi ${latest.number}` }
       : null;
     const fields = {
       internalName: t.internalName,
@@ -595,13 +598,13 @@
                 <li>Daftar berpoin dan bernomor; <kbd>Tab</kbd>/<kbd>Shift</kbd>+<kbd>Tab</kbd> mengubah tingkat butir</li>
                 <li>Tabel dengan baris header; di dalam tabel <kbd>Tab</kbd> berpindah sel</li>
                 <li>Tabel label–nilai: dua kolom tetap (label di kiri, nilai di kanan), baris dapat ditambah/dihapus, lebar kolom label 20%, 25%, atau 30%. Kolom tidak dapat ditambah, dihapus, atau digabung.</li>
-                <li>Klausul persetujuan: judul (teks biasa), penjelasan (paragraf dan daftar), dan pengaturan “Wajib dijawab Ya” (aktif secara bawaan). Pilihan jawaban selalu “Tidak” dan “Ya” tanpa jawaban bawaan. ID klausul dibuat otomatis; klausul tidak dapat ditempatkan di dalam klausul, daftar, atau tabel. <kbd>Enter</kbd> pada judul berpindah ke penjelasan.</li>
+                <li>Klausul persetujuan: judul (teks biasa), penjelasan (paragraf dan daftar), pengaturan “Wajib dijawab” (aktif secara bawaan), dan ${RT.OPTION_LIMITS.min}–${RT.OPTION_LIMITS.max} pilihan jawaban. Setiap pilihan memiliki label teks biasa (unik, tanpa HTML atau placeholder, maksimal ${RT.OPTION_LIMITS.label} karakter) dan, untuk klausul wajib, pengaturan “Memenuhi persyaratan” (minimal satu pilihan). Pilihan dapat ditambah, dihapus, dan diurutkan dengan tombol ↑/↓; pengguna memilih tepat satu, tanpa jawaban bawaan. Arti pilihan hanya ditentukan oleh pengaturan, bukan oleh labelnya. ID klausul dan pilihan dibuat otomatis; klausul tidak dapat ditempatkan di dalam klausul, daftar, atau tabel. <kbd>Enter</kbd> pada judul berpindah ke penjelasan.</li>
                 <li>Urungkan (<kbd>Ctrl</kbd>+<kbd>Z</kbd>) dan ulangi (<kbd>Ctrl</kbd>+<kbd>Y</kbd>)</li>
                 <li>Placeholder hanya dari katalog sistem, tampil sebagai label (mis. “Nama lengkap”). Placeholder dapat disisipkan atau dihapus, tetapi kuncinya tidak dapat diubah.</li>
                 <li><kbd>Esc</kbd> atau <kbd>Alt</kbd>+<kbd>F10</kbd>: pindah ke toolbar. Di toolbar, gunakan tombol panah; <kbd>Esc</kbd> kembali ke isi dokumen.</li>
               </ul>
               <p><strong>Tidak didukung:</strong> gambar, tautan, skrip, gaya/warna, dan sel gabungan. Isi tempelan dibatasi ke format di atas. Nilai placeholder selalu tampil sebagai teks biasa.</p>
-              <p>Isi disimpan sebagai JSON terstruktur (format <code>${RT.FORMAT}</code> versi ${RT.FORMAT_VERSIONS.join(', ')}; versi 2 bila dokumen memuat tabel label–nilai, versi 3 bila memuat klausul persetujuan). Ukuran maksimal ${RT.LIMITS.contentJson.toLocaleString('id-ID')} karakter JSON; isi tidak pernah dipotong otomatis.</p>
+              <p>Isi disimpan sebagai JSON terstruktur (format <code>${RT.FORMAT}</code> versi ${RT.FORMAT_VERSIONS.join(', ')}; versi 2 bila dokumen memuat tabel label–nilai, versi 4 bila memuat klausul persetujuan; versi 3 hanya untuk klausul “Tidak / Ya” lama). Ukuran maksimal ${RT.LIMITS.contentJson.toLocaleString('id-ID')} karakter JSON; isi tidak pernah dipotong otomatis.</p>
             </details>
           </div>
           <section class="preview-col" id="preview-col" aria-labelledby="preview-h">
@@ -624,31 +627,35 @@
       </form>`;
   }
 
-  /** Legacy Markdown source: explain, then offer the explicit conversion. */
+  /** Legacy source (Markdown or fixed “Tidak / Ya” clauses): explain, then offer the explicit conversion. */
   function renderConvert(t, e) {
     const src = t.draft || S.latestVersion(t);
     const what = e.legacy.label;
     const errors = e.convertErrors;
+    const md = e.legacy.kind === 'markdown';
     return `
       ${crumbs([{ label: 'Template', href: '#/' }, { label: t.internalName, href: `#/t/${t.id}` }, { label: 'Edit draf' }])}
       <div class="page-head">
         <div>
           <h1 id="page-title" tabindex="-1">Edit draf</h1>
-          <p class="lede">${esc(what)} memakai format Markdown lama.</p>
+          <p class="lede">${esc(what)} ${md ? 'memakai format Markdown lama' : 'memuat klausul persetujuan dengan pilihan tetap “Tidak / Ya”'}.</p>
         </div>
       </div>
       ${permNotice()}
       <section class="callout callout-info convert-panel" aria-labelledby="convert-h">
+        ${md ? `
         <h2 id="convert-h">Lanjutkan di editor visual</h2>
-        <p>Editor visual menyimpan isi sebagai JSON terstruktur. “Buat draf editor visual” membuat <strong>salinan JSON yang dapat diedit</strong> dari ${esc(what)}.</p>
+        <p>Editor visual menyimpan isi sebagai JSON terstruktur. “Buat draf editor visual” membuat <strong>salinan JSON yang dapat diedit</strong> dari ${esc(what)}.</p>` : `
+        <h2 id="convert-h">Ubah ke pilihan jawaban yang dapat diatur</h2>
+        <p>Klausul lama selalu memakai pilihan “Tidak” dan “Ya”, dan klausul wajib harus dijawab “Ya”. “Buat draf dengan pilihan yang dapat diatur” membuat <strong>draf baru yang dapat diedit</strong> dari ${esc(what)}: setiap klausul mendapat pilihan “Tidak” dan “Ya” (ID pilihan baru), dengan hanya “Ya” bertanda “Memenuhi persyaratan” — sama dengan aturan lama. Setelah itu label, urutan, dan persyaratan dapat diubah.</p>`}
         <ul class="checklist">
           <li>${e.legacy.draft
-            ? 'Isi draf Markdown diganti dengan salinan JSON yang setara, dan nomor revisi draf bertambah.'
+            ? (md ? 'Isi draf Markdown diganti dengan salinan JSON yang setara, dan nomor revisi draf bertambah.' : 'Isi draf diganti dengan salinan yang klausulnya dapat diatur, dan nomor revisi draf bertambah.')
             : `${esc(what)} tetap tersimpan tanpa perubahan dan tetap ditampilkan dengan format aslinya.`}</li>
-          <li>Versi terbit serta dokumen yang sudah ditugaskan atau disetujui pengguna tidak diubah.</li>
-          <li>Teks, format, tabel, dan placeholder dipertahankan. Jika ada isi yang tidak dapat dipertahankan persis, tidak ada yang disimpan.</li>
+          <li>Versi terbit serta dokumen yang sudah ditugaskan atau disetujui pengguna tidak diubah. Tidak ada yang diterbitkan, ditugaskan ulang, atau perlu disetujui ulang.</li>
+          <li>${md ? 'Teks, format, tabel, dan placeholder dipertahankan. Jika ada isi yang tidak dapat dipertahankan persis, tidak ada yang disimpan.' : 'Teks, ID klausul, dan pengaturan “Wajib dijawab” dipertahankan.'}</li>
         </ul>
-        <p><button type="button" class="btn btn-primary" data-action="convert-legacy">Buat draf editor visual</button>
+        <p><button type="button" class="btn btn-primary" data-action="convert-legacy">${md ? 'Buat draf editor visual' : 'Buat draf dengan pilihan yang dapat diatur'}</button>
           <a class="btn" href="#/t/${esc(t.id)}">Batal</a></p>
       </section>
       ${errors ? `
@@ -671,7 +678,7 @@
     try {
       const t = S.convertLegacyDraft(app.data, e.templateId, e.lockVersion, ACTOR, now());
       app.editor = newEditorSession(t);
-      toast(`Draf editor visual dibuat · revisi ${t.draft.revision}. ${e.legacy.draft ? 'Versi terbit' : e.legacy.label} tidak berubah.`);
+      toast(`${e.legacy.kind === 'markdown' ? 'Draf editor visual' : 'Draf dengan pilihan yang dapat diatur'} dibuat · revisi ${t.draft.revision}. ${e.legacy.draft ? 'Versi terbit' : e.legacy.label} tidak berubah.`);
       render();
     } catch (err) {
       if (err instanceof S.StoreError && err.code === 'CONVERSION_FAILED') {
@@ -776,7 +783,7 @@
         ${group('Tabel label–nilai', tool('insertKvTable', 'Tabel label–nilai', icon('insertKvTable') + '<span class="tool-text">Tabel label–nilai</span>') +
           tool('kvWidth20', 'Lebar kolom label 20%', '20%') + tool('kvWidth25', 'Lebar kolom label 25%', '25%') + tool('kvWidth30', 'Lebar kolom label 30%', '30%'))}
         ${group('Klausul persetujuan', tool('insertClause', 'Klausul persetujuan', icon('insertClause') + '<span class="tool-text">Klausul persetujuan</span>') +
-          tool('clauseRequired', 'Wajib dijawab Ya', 'Wajib dijawab Ya') + tool('deleteClause', 'Hapus klausul', 'Hapus klausul'))}
+          tool('clauseRequired', 'Wajib dijawab', 'Wajib dijawab') + tool('deleteClause', 'Hapus klausul', 'Hapus klausul'))}
         <div class="tool-group" role="group" aria-label="Placeholder">
           <div class="ph-wrap">
             <button type="button" class="tool tool-ph" tabindex="-1" id="ph-btn" data-action="ph-toggle" aria-haspopup="menu" aria-expanded="false" aria-controls="ph-menu">Sisipkan placeholder ▾</button>
@@ -845,6 +852,7 @@
         element: holder,
         content: JSON.parse(JSON.stringify(e.content.document)),
         catalogue: MD.PLACEHOLDERS,
+        optionIssues: RT.optionIssues,
         attributes: {
           id: 'f-content', class: 'rte-content', role: 'textbox', 'aria-multiline': 'true',
           'aria-labelledby': 'content-label', 'aria-describedby': 'content-help err-content', 'aria-required': 'true',
@@ -1290,8 +1298,8 @@
   const a11yTables = (html) => html.replace(/<div class="table-wrap">/g,
     '<div class="table-wrap" tabindex="0" role="region" aria-label="Tabel, geser untuk melihat semua kolom">');
 
-  const answerLabel = (v) => (v == null ? 'Tidak dijawab' : (RT.CLAUSE_ANSWERS.find((x) => x.value === v) || { label: v }).label);
   const clausesOf = (s) => s.clauses || [];
+  const clauseOf = (s, id) => clausesOf(s).find((c) => c.id === id) || null;
 
   /** Unconfirmed answers for this assignment (empty when first opened). */
   function draftAnswers(a) {
@@ -1306,7 +1314,7 @@
     if (!acc.answers) return '<p>Jawaban klausul tidak tercatat untuk persetujuan ini.</p>';
     return `
       <h3 class="recorded-h">Jawaban klausul yang dicatat</h3>
-      <dl class="dl dl-compact recorded-answers">${clauses.map((c) => `<dt>${esc(c.title)}</dt><dd data-clause-answer="${esc(c.id)}">${esc(answerLabel(acc.answers[c.id]))}</dd>`).join('')}</dl>`;
+      <dl class="dl dl-compact recorded-answers">${clauses.map((c) => `<dt>${esc(c.title)}</dt><dd data-clause-answer="${esc(c.id)}">${esc(U.answerLabel(c, acc.answers[c.id]))}</dd>`).join('')}</dl>`;
   }
 
   function renderUserDoc(route) {
@@ -1375,7 +1383,11 @@
   const clauseSets = () => Array.from(document.querySelectorAll('.doc-user fieldset.clause'));
   const radiosOf = (fs) => Array.from(fs.querySelectorAll('input[type="radio"]'));
 
-  /** Enable “Setujui Perjanjian” only when consent is checked and every required clause is “Ya”. */
+  /**
+   * Enable “Setujui Perjanjian” only when consent is checked and every
+   * required clause has a qualifying answer. Each blocking clause also gets a
+   * text explanation inside the clause (not only a colour change).
+   */
   function updateAcceptState(a) {
     const btn = $('#btn-accept');
     const consent = $('#consent');
@@ -1389,7 +1401,10 @@
         <ul>${issues.map((i) => `<li><button type="button" class="link-btn" data-action="focus-clause" data-clause="${esc(i.clauseId)}">${esc(i.message)}</button></li>`).join('')}</ul>` : '');
     }
     clauseSets().forEach((fs) => {
-      fs.classList.toggle('is-blocking', issues.some((i) => i.clauseId === fs.dataset.clauseId && i.answer === 'tidak'));
+      const issue = issues.find((i) => i.clauseId === fs.dataset.clauseId && i.answer != null);
+      fs.classList.toggle('is-blocking', Boolean(issue));
+      const status = fs.querySelector('.clause-status');
+      if (status) status.textContent = issue ? `Belum dapat disetujui: pilihan ini tidak memenuhi persyaratan. Pilih ${issue.accepted}.` : '';
     });
   }
 
@@ -1397,20 +1412,27 @@
     const sets = clauseSets();
     if (!sets.length) return;
     if (acc) {
-      // Read-only: show the recorded answers; nothing can change them.
+      // Read-only: show the recorded answers with the snapshot's labels; nothing can change them.
       sets.forEach((fs) => {
         const v = acc.answers ? acc.answers[fs.dataset.clauseId] : undefined;
         radiosOf(fs).forEach((r) => { r.checked = v != null && r.value === v; });
         fs.disabled = true;
         const note = document.createElement('p');
         note.className = 'clause-recorded';
-        note.textContent = acc.answers ? `Jawaban tercatat: ${answerLabel(v)}` : 'Jawaban tidak tercatat.';
+        note.textContent = acc.answers ? `Jawaban tercatat: ${U.answerLabel(clauseOf(a.snapshot, fs.dataset.clauseId), v)}` : 'Jawaban tidak tercatat.';
         fs.appendChild(note);
       });
       return;
     }
     const answers = draftAnswers(a);
     sets.forEach((fs) => {
+      // Text explanation of a blocking answer, announced when it changes.
+      const status = document.createElement('p');
+      status.className = 'clause-status';
+      status.id = 'status-' + fs.dataset.clauseId;
+      status.setAttribute('aria-live', 'polite');
+      fs.appendChild(status);
+      fs.setAttribute('aria-describedby', `${fs.getAttribute('aria-describedby') || ''} ${status.id}`.trim());
       radiosOf(fs).forEach((r) => {
         r.checked = answers[fs.dataset.clauseId] === r.value;
         // Choosing an answer only updates local state; it never submits or records anything.
@@ -1485,7 +1507,7 @@
         <p>Anda akan menyetujui <strong>${esc(s.title)}</strong>, <strong>Versi ${s.templateVersion}</strong>.</p>
         ${clauses.length ? `
           <p>Jawaban klausul yang akan dicatat:</p>
-          <dl class="dl dl-compact">${clauses.map((c) => `<dt>${esc(c.title)}</dt><dd>${esc(answerLabel(review.answers[c.id]))}</dd>`).join('')}</dl>` : ''}
+          <dl class="dl dl-compact">${clauses.map((c) => `<dt>${esc(c.title)}</dt><dd>${esc(U.answerLabel(c, review.answers[c.id]))}</dd>`).join('')}</dl>` : ''}
         <p>Persetujuan dicatat untuk dokumen persis seperti yang ditampilkan${clauses.length ? ', bersama jawaban di atas' : ''}.</p>
         <p class="hint">Simulasi: dicatat di memori untuk pengguna sintetis, tanpa tanda tangan elektronik atau kekuatan hukum.</p>`,
       confirmLabel: 'Ya, setujui',
