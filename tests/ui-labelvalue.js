@@ -100,7 +100,7 @@ async function main() {
   click($('[data-action="publish"]'));
   confirmDialog(); await tick();
   await go('#/t/tpl_6/v/1');
-  check(text().includes('Editor visual (JSON v2) · tata letak v4') && $('.doc-body .kv-table.kv-w30'), 'version records format and layout versions');
+  check(text().includes('Editor visual (JSON v2) · tata letak v5') && $('.doc-body .kv-table.kv-w30'), 'version records format and layout versions');
   const adminHtml = $('.doc-body').innerHTML;
   await go('#/saya');
   $('#sim-assign-tpl').value = 'tpl_6';

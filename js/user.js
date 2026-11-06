@@ -15,7 +15,10 @@
  *   qualifies, in order). An acceptance of a snapshot with clauses records
  *   `answers` keyed by clause ID: the selected option ID, or null for an
  *   unanswered optional clause. Labels are never used as identifiers. A
- *   required clause needs a qualifying option. Format-3 snapshots keep their
+ *   required clause needs a qualifying option. Format 5 freezes `options`
+ *   (ID, label) and `qualifyingOptionId` instead of `required`: a clause with
+ *   options needs exactly that option; an information-only clause (no
+ *   options) gets no answer entry and never blocks. Format-3 snapshots keep their
  *   fixed options ('tidak' / 'ya'; only 'ya' qualifies). Snapshots without
  *   clauses, and acceptances made before clauses existed, have neither field;
  *   nothing is invented for them.
@@ -140,6 +143,8 @@
   }
 
   const clausesOfSnapshot = (s) => s.clauses || [];
+  /** Clauses that take an answer (format 5: those with options; earlier formats: all). */
+  const answerableClauses = (s) => clausesOfSnapshot(s).filter((c) => RT.clauseRule(c).answerable);
   const optionOf = (c, id) => RT.clauseOptions(c).find((o) => o.id === id) || null;
 
   /** Label of an answer, from the snapshot's frozen options. */
@@ -150,16 +155,17 @@
   }
 
   /**
-   * Answers for every clause of the snapshot, in clause order, with `null`
-   * for unanswered ones. Unknown clause IDs and option IDs that do not belong
-   * to that clause are refused.
+   * Answers for every answerable clause of the snapshot, in clause order,
+   * with `null` for unanswered ones. Information-only clauses get no entry.
+   * Unknown clause IDs, answers to information-only clauses, and option IDs
+   * that do not belong to that clause are refused.
    */
   function normalizeAnswers(snapshot, answers) {
     const given = answers == null ? {} : answers;
     if (typeof given !== 'object' || Array.isArray(given)) throw new StoreError('INVALID', 'Jawaban klausul tidak valid.');
-    const clauses = clausesOfSnapshot(snapshot);
+    const clauses = answerableClauses(snapshot);
     const unknown = Object.keys(given).filter((k) => !clauses.some((c) => c.id === k));
-    if (unknown.length) throw new StoreError('INVALID', 'Jawaban untuk klausul yang tidak ada di dokumen ini.', { clauseIds: unknown });
+    if (unknown.length) throw new StoreError('INVALID', 'Jawaban untuk klausul yang tidak ada di dokumen ini atau tidak memerlukan jawaban.', { clauseIds: unknown });
     const out = {};
     clauses.forEach((c) => {
       const v = given[c.id] == null ? null : given[c.id];
@@ -171,17 +177,20 @@
 
   /**
    * Required clauses without a qualifying answer, each with a message naming
-   * the clause, the current answer, and the qualifying options. Optional
-   * clauses never block. `answer` is the selected option ID or null.
+   * the clause, the current answer, and the qualifying option(s). Format-5
+   * clauses with options are always required; information-only clauses and
+   * historical optional clauses never block. `answer` is the selected option
+   * ID or null.
    */
   function clauseIssues(snapshot, answers) {
     const given = answers || {};
     return clausesOfSnapshot(snapshot).filter((c) => {
-      const o = c.required ? optionOf(c, given[c.id]) : null;
-      return c.required && !(o && o.qualifies);
+      const rule = RT.clauseRule(c);
+      return rule.required && !rule.qualifying.includes(given[c.id]);
     }).map((c) => {
+      const rule = RT.clauseRule(c);
       const answer = given[c.id] == null ? null : given[c.id];
-      const accepted = RT.labelList(RT.clauseOptions(c).filter((o) => o.qualifies).map((o) => o.label));
+      const accepted = RT.labelList(rule.options.filter((o) => rule.qualifying.includes(o.id)).map((o) => o.label));
       return {
         clauseId: c.id, title: c.title, answer, accepted,
         message: answer == null
@@ -214,7 +223,7 @@
       throw new StoreError('STALE', 'Konfirmasi tidak cocok dengan dokumen ini. Tinjau ulang dokumen.');
     }
     let answers = null;
-    if (clausesOfSnapshot(s).length) {
+    if (answerableClauses(s).length) {
       answers = normalizeAnswers(s, review && review.answers);
       const issues = clauseIssues(s, answers);
       if (issues.length) throw new StoreError('CLAUSE_REQUIRED', issues[0].message, { issues });
@@ -261,7 +270,7 @@
 
   const api = {
     SIM_USER_ID, PROFILE_PRESETS, placeholdersIn, setProfile, assignVersion, getAssignment,
-    acceptanceFor, listForUser, acceptAssignment, emptyUserState, createSeedUserState, normalizeAnswers, clauseIssues, answerLabel,
+    acceptanceFor, listForUser, acceptAssignment, emptyUserState, createSeedUserState, normalizeAnswers, clauseIssues, answerLabel, answerableClauses,
   };
   if (node) module.exports = api;
   else root.AgreementUser = api;

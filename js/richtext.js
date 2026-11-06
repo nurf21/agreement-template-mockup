@@ -19,7 +19,14 @@
  *   generated, `label` plain text, `qualifies` = “Memenuhi persyaratan”).
  *   A required clause needs at least one qualifying option. No meaning is
  *   inferred from labels. Every clause of a version-4 document has options.
- *   Clause and option IDs are unique within a document.
+ *   Clause and option IDs are unique within a document. Kept readable for
+ *   historical records; new content cannot be saved with these clauses.
+ * - 5 (current): consent clauses carry `attrs: { clauseId, options,
+ *   qualifyingOptionId }` and no `required` flag. `options`: 0–2
+ *   `{ id, label }`. Behaviour follows the option count: 0 = information
+ *   only (`qualifyingOptionId` null), 1 = that option qualifies
+ *   (`qualifyingOptionId` equals its ID), 2 = `qualifyingOptionId` names
+ *   exactly one of them. Nothing is inferred from labels.
  * `wrap()` picks the lowest version that can express a document, so older
  * documents keep their version.
  * RENDER_VERSION names the HTML layout rules; it is recorded on published
@@ -40,11 +47,12 @@
     : root.AgreementMarkdown;
 
   const FORMAT = 'richtext-json';
-  const FORMAT_VERSION = 4; // latest supported
-  const FORMAT_VERSIONS = [1, 2, 3, 4];
-  // 3: adds the consent-clause fieldset; 4: configurable clause options.
-  // Rules for older nodes (including fixed “Tidak / Ya” clauses) are unchanged.
-  const RENDER_VERSION = 4;
+  const FORMAT_VERSION = 5; // latest supported
+  const FORMAT_VERSIONS = [1, 2, 3, 4, 5];
+  // 3: adds the consent-clause fieldset; 4: configurable clause options;
+  // 5: information-only clauses and a single qualifying option.
+  // Rules for older nodes (including format-3/4 clauses) are unchanged.
+  const RENDER_VERSION = 5;
   // Table presets: identifier -> allowed left-column widths (percent).
   // Visual styles are derived from these values; no style strings are stored.
   const TABLE_PRESETS = Object.freeze({
@@ -63,7 +71,9 @@
   const FIXED_OPTIONS = Object.freeze(CLAUSE_ANSWERS.map((a) => Object.freeze({ id: a.value, label: a.label, qualifies: a.value === 'ya' })));
   const OPTIONS_SINCE = 4;
   const OPTION_ID_RE = /^op_[a-z0-9]{10}$/;
-  const OPTION_LIMITS = Object.freeze({ min: 2, max: 5, label: 80 });
+  const OPTION_LIMITS = Object.freeze({ min: 2, max: 5, label: 80 }); // format 4 (historical)
+  const QUALIFYING_SINCE = 5;
+  const CLAUSE_OPTION_MAX = 2; // format 5
   const KNOWN = new Map(MD.PLACEHOLDERS.map((p) => [p.key, p]));
 
   // Size limit: length of JSON.stringify(envelope.document), in UTF-16 code
@@ -108,10 +118,11 @@
       content: ['clauseTitle', 'clauseBody'], min: 2,
       attrs: {
         clauseId: (v) => typeof v === 'string' && CLAUSE_ID_RE.test(v),
-        required: (v) => typeof v === 'boolean',
-        options: Array.isArray, // details: optionIssues()
+        required: (v) => typeof v === 'boolean', // formats 3–4 only
+        options: Array.isArray, // details: optionIssues() / clauseOptionIssues()
+        qualifyingOptionId: (v) => v === null || typeof v === 'string', // format 5 only
       },
-      required: ['clauseId', 'required'],
+      required: ['clauseId'],
     },
     clauseTitle: { content: ['text'] },
     clauseBody: { content: CELL_CONTENT, min: 1 },
@@ -139,13 +150,21 @@
   }
 
   const presetOf = (node) => (isObj(node) && isObj(node.attrs) && node.attrs.preset != null ? node.attrs.preset : null);
+  const has = (o, k) => isObj(o) && Object.prototype.hasOwnProperty.call(o, k);
+
+  /** Format version a clause node (or its attrs) was written for: 3, 4, or 5. */
+  function clauseFormat(nodeOrAttrs) {
+    const attrs = isObj(nodeOrAttrs) && isObj(nodeOrAttrs.attrs) ? nodeOrAttrs.attrs : nodeOrAttrs;
+    if (has(attrs, 'qualifyingOptionId')) return QUALIFYING_SINCE;
+    return has(attrs, 'options') ? OPTIONS_SINCE : CLAUSE_SINCE;
+  }
 
   /** Lowest format version able to express the document. */
   function requiredVersion(document) {
     let v = 1;
     walk(document, (n) => {
       if (n.type === 'table' && presetOf(n) !== null) v = Math.max(v, 2);
-      if (n.type === 'consentClause') v = Math.max(v, isObj(n.attrs) && n.attrs.options !== undefined ? OPTIONS_SINCE : CLAUSE_SINCE);
+      if (n.type === 'consentClause') v = Math.max(v, clauseFormat(n));
     });
     return v;
   }
@@ -212,18 +231,31 @@
       if (title && !/\S/.test(inlineText(title))) add(where, 'Judul klausul persetujuan wajib diisi.');
       const attrs = isObj(node.attrs) ? node.attrs : {};
       const label = title && /\S/.test(inlineText(title)) ? `Klausul “${inlineText(title).trim().slice(0, 60)}”` : 'Klausul persetujuan';
-      if (envelope.formatVersion < OPTIONS_SINCE) {
-        if (attrs.options !== undefined) add(where, `Pilihan jawaban yang dapat diatur memerlukan format versi ${OPTIONS_SINCE}.`);
-        return;
-      }
-      if (!Array.isArray(attrs.options)) { add(where, `${label} wajib memiliki ${OPTION_LIMITS.min}–${OPTION_LIMITS.max} pilihan jawaban.`); return; }
-      optionIssues(attrs.options, attrs.required === true).forEach((i) => {
+      const collect = (i) => {
         if (i.id) {
           if (optionIds.has(i.id)) add(where, `${label}: ID pilihan “${i.id}” dipakai lebih dari sekali dalam dokumen.`);
           optionIds.add(i.id);
         }
         if (i.message) add(where, `${label}${i.index != null ? `, pilihan ${i.index + 1}` : ''}: ${i.message}`);
-      });
+      };
+      const fmt = clauseFormat(attrs);
+      if (fmt === QUALIFYING_SINCE) {
+        if (envelope.formatVersion < QUALIFYING_SINCE) add(where, `Pilihan yang memenuhi syarat memerlukan format versi ${QUALIFYING_SINCE}.`);
+        if (has(attrs, 'required')) add(where, `${label}: pengaturan “Wajib dijawab” tidak dipakai lagi; perilaku klausul mengikuti jumlah pilihan.`);
+        clauseOptionIssues(attrs.options, attrs.qualifyingOptionId).forEach(collect);
+        return;
+      }
+      // Historical clauses (formats 3 and 4).
+      if (typeof attrs.required !== 'boolean') add(where, 'Atribut “required” wajib pada klausul persetujuan format lama.');
+      if (envelope.formatVersion >= QUALIFYING_SINCE) {
+        add(where, `${label} memakai aturan klausul lama (format ${fmt}). Sesuaikan dengan aturan pilihan baru (0–${CLAUSE_OPTION_MAX} pilihan dan satu pilihan yang memenuhi syarat).`);
+      }
+      if (envelope.formatVersion < OPTIONS_SINCE) {
+        if (attrs.options !== undefined) add(where, `Pilihan jawaban yang dapat diatur memerlukan format versi ${OPTIONS_SINCE}.`);
+        return;
+      }
+      if (!Array.isArray(attrs.options)) { add(where, `${label} wajib memiliki ${OPTION_LIMITS.min}–${OPTION_LIMITS.max} pilihan jawaban.`); return; }
+      optionIssues(attrs.options, attrs.required === true).forEach(collect);
     };
 
     const visit = (node, parentType, where, depth) => {
@@ -322,15 +354,51 @@
     if (options.length < OPTION_LIMITS.min || options.length > OPTION_LIMITS.max) {
       out.push({ index: null, message: `Jumlah pilihan jawaban harus ${OPTION_LIMITS.min}–${OPTION_LIMITS.max} (saat ini ${options.length}).` });
     }
+    eachOptionIssues(options, ['id', 'label', 'qualifies'], out, (o, msg) => {
+      if (typeof o.qualifies !== 'boolean') msg('Pengaturan “Memenuhi persyaratan” harus bernilai benar atau salah.');
+    });
+    if (required && !options.some((o) => isObj(o) && o.qualifies === true)) {
+      out.push({ index: null, message: 'Klausul wajib dijawab harus memiliki minimal satu pilihan yang “Memenuhi persyaratan”.' });
+    }
+    return out;
+  }
+
+  /**
+   * Issues of one format-5 clause: 0–2 options `{ id, label }` (label rules as
+   * above) and `qualifyingOptionId`: null without options, the only option's
+   * ID with one option, one of the two IDs with two options. Same issue shape
+   * as optionIssues(); shared with the editor. Nothing is ever removed here:
+   * more than two options is reported, never truncated.
+   */
+  function clauseOptionIssues(options, qualifyingOptionId) {
+    if (!Array.isArray(options)) return [{ index: null, message: 'Pilihan jawaban harus berupa daftar.' }];
+    const out = [];
+    if (options.length > CLAUSE_OPTION_MAX) {
+      out.push({ index: null, message: `Maksimal ${CLAUSE_OPTION_MAX} pilihan jawaban (saat ini ${options.length}). Hapus pilihan hingga tersisa paling banyak dua; tidak ada pilihan yang dihapus otomatis.` });
+    }
+    eachOptionIssues(options, ['id', 'label'], out);
+    const ids = options.map((o) => (isObj(o) ? o.id : undefined));
+    const q = qualifyingOptionId;
+    const msg = (message) => out.push({ index: null, message });
+    if (q !== null && typeof q !== 'string') msg('“Pilihan yang memenuhi syarat” tidak valid.');
+    else if (!options.length) { if (q !== null) msg('Klausul tanpa pilihan (informasi saja) tidak boleh memiliki pilihan yang memenuhi syarat.'); }
+    else if (options.length === 1) { if (q !== ids[0]) msg('Satu-satunya pilihan harus menjadi pilihan yang memenuhi syarat.'); }
+    else if (q === null) msg('Tentukan satu “Pilihan yang memenuhi syarat”.');
+    else if (!ids.includes(q)) msg('“Pilihan yang memenuhi syarat” harus merujuk ke salah satu pilihan klausul ini.');
+    return out;
+  }
+
+  /** Per-option checks shared by formats 4 and 5 (ID, allowed keys, label rules, unique labels). */
+  function eachOptionIssues(options, keys, out, more) {
     const seen = new Map();
     options.forEach((o, index) => {
       const msg = (message) => out.push({ index, message });
       if (!isObj(o)) { msg('Pilihan tidak valid.'); return; }
-      const extra = Object.keys(o).filter((k) => !['id', 'label', 'qualifies'].includes(k));
+      const extra = Object.keys(o).filter((k) => !keys.includes(k));
       if (extra.length) msg('Properti tidak dikenal: ' + extra.map((k) => k.slice(0, 40)).join(', ') + '.');
       if (typeof o.id === 'string' && OPTION_ID_RE.test(o.id)) out.push({ index, id: o.id });
       else msg('ID pilihan tidak valid (dibuat otomatis oleh sistem).');
-      if (typeof o.qualifies !== 'boolean') msg('Pengaturan “Memenuhi persyaratan” harus bernilai benar atau salah.');
+      if (more) more(o, msg);
       if (typeof o.label !== 'string') { msg('Label pilihan wajib berupa teks.'); return; }
       const label = o.label.trim();
       if (!label) { msg('Label pilihan wajib diisi.'); return; }
@@ -342,10 +410,6 @@
       if (seen.has(key)) msg(`Label “${label.slice(0, 40)}” sama dengan pilihan ${seen.get(key) + 1} (huruf besar/kecil dan spasi di tepi diabaikan).`);
       else seen.set(key, index);
     });
-    if (required && !options.some((o) => isObj(o) && o.qualifies === true)) {
-      out.push({ index: null, message: 'Klausul wajib dijawab harus memiliki minimal satu pilihan yang “Memenuhi persyaratan”.' });
-    }
-    return out;
   }
 
   /** Concatenated text of a node's text descendants. */
@@ -364,14 +428,23 @@
   function clausesOf(envelope) {
     const doc = envelope && envelope.document;
     if (!isObj(doc) || !Array.isArray(doc.content)) return [];
-    return doc.content.filter((n) => isObj(n) && n.type === 'consentClause').map((n) => ({
-      id: n.attrs.clauseId,
-      title: inlineText(n.content[0]).trim(),
-      required: n.attrs.required === true,
-      ...(Array.isArray(n.attrs.options) ? {
-        options: n.attrs.options.map((o) => ({ id: o.id, label: o.label.trim(), qualifies: o.qualifies === true })),
-      } : {}),
-    }));
+    return doc.content.filter((n) => isObj(n) && n.type === 'consentClause').map((n) => {
+      const base = { id: n.attrs.clauseId, title: inlineText(n.content[0]).trim() };
+      if (clauseFormat(n) === QUALIFYING_SINCE) {
+        return {
+          ...base,
+          options: n.attrs.options.map((o) => ({ id: o.id, label: o.label.trim() })),
+          qualifyingOptionId: n.attrs.qualifyingOptionId,
+        };
+      }
+      return {
+        ...base,
+        required: n.attrs.required === true,
+        ...(Array.isArray(n.attrs.options) ? {
+          options: n.attrs.options.map((o) => ({ id: o.id, label: o.label.trim(), qualifies: o.qualifies === true })),
+        } : {}),
+      };
+    });
   }
 
   /** Options of a clause (node attrs or snapshot clause): its own, or the fixed version-3 options. */
@@ -379,11 +452,63 @@
     return clause && Array.isArray(clause.options) ? clause.options : FIXED_OPTIONS;
   }
 
+  /**
+   * Answer rule of a snapshot clause (any format):
+   * { options, answerable, required, qualifying: [option IDs] }.
+   * Format 5: a clause with options is answerable and required, and only
+   * `qualifyingOptionId` qualifies; without options it takes no answer.
+   * Formats 3–4 keep their rules (every clause answerable, `required` flag,
+   * per-option `qualifies`; format 3 has the fixed “Tidak / Ya”).
+   */
+  function clauseRule(clause) {
+    if (has(clause, 'qualifyingOptionId')) {
+      const answerable = clause.options.length > 0;
+      return { options: clause.options, answerable, required: answerable, qualifying: clause.qualifyingOptionId == null ? [] : [clause.qualifyingOptionId] };
+    }
+    const options = clauseOptions(clause);
+    return { options, answerable: true, required: clause.required === true, qualifying: options.filter((o) => o.qualifies).map((o) => o.id) };
+  }
+
+  const countClauses = (envelope, test) => {
+    let n = 0;
+    walk(envelope && envelope.document, (x) => { if (x.type === 'consentClause' && test(x)) n++; });
+    return n;
+  };
+
   /** Number of fixed-option (format version 3) clauses. Such content is read-only history. */
   function fixedClauseCount(envelope) {
-    let n = 0;
-    walk(envelope && envelope.document, (x) => { if (x.type === 'consentClause' && !(isObj(x.attrs) && x.attrs.options !== undefined)) n++; });
-    return n;
+    return countClauses(envelope, (x) => clauseFormat(x) === CLAUSE_SINCE);
+  }
+
+  /** Number of clauses written for format 3 or 4. Readable history; never saved or published again. */
+  function legacyClauseCount(envelope) {
+    return countClauses(envelope, (x) => clauseFormat(x) < QUALIFYING_SINCE);
+  }
+
+  /**
+   * For explicitly editing a draft or version in the editor: maps format-4
+   * clauses to the format-5 shape. Every option is kept (ID and label, in
+   * order, even beyond two). `qualifyingOptionId` is only carried over when it
+   * is unambiguous (a required clause with exactly one qualifying option);
+   * otherwise it is null and the admin must decide. The result may therefore
+   * be invalid until corrected; nothing is saved by this function. Format-3
+   * clauses are left alone (they need the explicit conversion). Returns
+   * { content, migrated } with a new envelope; the source is not modified.
+   */
+  function editableClauses(envelope) {
+    const doc = JSON.parse(JSON.stringify(envelope.document));
+    let migrated = 0;
+    doc.content.forEach((n) => {
+      if (!isObj(n) || n.type !== 'consentClause' || clauseFormat(n) !== OPTIONS_SINCE || !Array.isArray(n.attrs.options)) return;
+      const qualifying = n.attrs.options.filter((o) => isObj(o) && o.qualifies === true);
+      n.attrs = {
+        clauseId: n.attrs.clauseId,
+        options: n.attrs.options.map((o) => (isObj(o) ? { id: o.id, label: o.label } : o)),
+        qualifyingOptionId: n.attrs.required === true && qualifying.length === 1 ? qualifying[0].id : null,
+      };
+      migrated++;
+    });
+    return { content: migrated ? wrap(doc) : envelope, migrated };
   }
 
   /** Quoted option labels joined with “atau”, e.g. “A” atau “B”. */
@@ -487,7 +612,10 @@
    * radio group (unique name per clause, nothing checked). Version-3 clauses
    * keep their original fixed “Tidak / Ya” markup. Version-4 clauses list the
    * stored options in order (value = option ID) and state the requirement in
-   * text: which options qualify, or that the clause is optional. IDs derive
+   * text: which options qualify, or that the clause is optional. Format-5
+   * clauses without options render as a plain information block (no
+   * controls); with options they always state the single qualifying option.
+   * IDs derive
    * from validated clause/option IDs. `opts.preview` renders a separately-
    * prefixed, clearly labelled simulation for admin views.
    */
@@ -495,13 +623,26 @@
     const preview = Boolean(opts && opts.preview);
     const id = node.attrs.clauseId;
     const base = (preview ? 'pv-' : '') + 'clause-' + id;
-    const required = node.attrs.required === true;
+    const title = esc(inlineText(node.content[0]).trim());
+    const body = `<div class="clause-body" id="${base}-desc">${kids(node.content[1].content)}</div>`;
+    const v5 = clauseFormat(node) === QUALIFYING_SINCE;
+    // Format 5 without options: an ordinary information block, no controls.
+    if (v5 && !node.attrs.options.length) {
+      return `<section class="clause clause-info" data-clause-id="${id}" aria-labelledby="${base}-title">` +
+        `<p class="clause-title" id="${base}-title">${title}</p>${body}</section>`;
+    }
+    const required = v5 || node.attrs.required === true;
     const configurable = Array.isArray(node.attrs.options);
     const describedBy = [base + '-desc'].concat(required || configurable ? [base + '-req'] : []).concat(preview ? [base + '-sim'] : []).join(' ');
     const radio = (value, label) => `<label class="clause-option" for="${base}-${value}"><input type="radio" id="${base}-${value}" name="${base}" value="${value}"> <span>${esc(label)}</span></label>`;
     let req = '';
     let options;
-    if (configurable) {
+    if (v5) {
+      const list = node.attrs.options.map((o) => ({ ...o, label: o.label.trim() }));
+      const q = list.find((o) => o.id === node.attrs.qualifyingOptionId);
+      options = list.map((o) => radio(o.id, o.label)).join('');
+      req = `<p class="clause-req" id="${base}-req"><strong>Wajib dijawab.</strong> Perjanjian hanya dapat disetujui dengan pilihan ${esc(labelList(q ? [q.label] : []))}.</p>`;
+    } else if (configurable) {
       const list = node.attrs.options.map((o) => ({ ...o, label: o.label.trim() }));
       options = list.map((o) => radio(o.id, o.label)).join('');
       req = required
@@ -512,9 +653,9 @@
       if (required) req = `<p class="clause-req" id="${base}-req">Wajib dijawab Ya</p>`;
     }
     return `<fieldset class="clause${required ? ' clause-required' : ''}" data-clause-id="${id}" data-required="${required}" aria-describedby="${describedBy}">` +
-      `<legend class="clause-title">${esc(inlineText(node.content[0]).trim())}</legend>` +
+      `<legend class="clause-title">${title}</legend>` +
       (preview ? `<p class="clause-sim" id="${base}-sim">Simulasi pratinjau — pilihan tidak disimpan dan tidak dicatat sebagai jawaban.</p>` : '') +
-      `<div class="clause-body" id="${base}-desc">${kids(node.content[1].content)}</div>` +
+      body +
       req +
       `<div class="clause-options">${options}</div></fieldset>`;
   }
@@ -637,7 +778,8 @@
 
   const api = {
     FORMAT, FORMAT_VERSION, FORMAT_VERSIONS, RENDER_VERSION, TABLE_PRESETS, LIMITS, CLAUSE_ANSWERS, CLAUSE_ID_RE,
-    OPTION_ID_RE, OPTION_LIMITS, optionIssues, clauseOptions, fixedClauseCount, convertFixedClauses, labelList, clausesOf, requiredVersion, isEnvelope, emptyContent, wrap, structureIssues, contentIssues,
+    OPTION_ID_RE, OPTION_LIMITS, CLAUSE_OPTION_MAX, optionIssues, clauseOptionIssues, clauseOptions, clauseRule, clauseFormat,
+    fixedClauseCount, legacyClauseCount, editableClauses, convertFixedClauses, labelList, clausesOf, requiredVersion, isEnvelope, emptyContent, wrap, structureIssues, contentIssues,
     hasMeaningfulContent, contentSize, placeholderKeys, validateDraft, renderDocument, plainText,
     convertMarkdown, freezeCopy,
   };

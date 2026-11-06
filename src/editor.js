@@ -193,19 +193,20 @@ function labelOf(catalogue, key) {
 }
 
 /*
- * Consent clause (“Klausul persetujuan”, format version 4): a top-level block
+ * Consent clause (“Klausul persetujuan”, format version 5): a top-level block
  * holding exactly a plain-text title and explanatory text (paragraphs and
- * lists). Attributes: a system-generated `clauseId`, the boolean `required`
- * (“Wajib dijawab”, on by default), and `options`: 2–5 administrator-defined
- * answers { id (system-generated), label (plain text), qualifies (“Memenuhi
- * persyaratan”) }. Options are edited in a form below the text (node view);
- * renaming or reordering keeps IDs. The document schema allows clauses only
- * at the top level, so they cannot be nested in clauses, lists, or tables.
+ * lists). Attributes: a system-generated `clauseId`, `options`: 0–2
+ * administrator-defined answers { id (system-generated), label (plain text) },
+ * and `qualifyingOptionId`. Behaviour follows the option count: no options =
+ * information only (null); one option = it qualifies automatically; two
+ * options = the admin picks exactly one (“Pilihan yang memenuhi syarat”).
+ * Options are edited in a form below the text (node view); renaming or
+ * reordering keeps IDs. The document schema allows clauses only at the top
+ * level, so they cannot be nested in clauses, lists, or tables.
  */
 export const CLAUSE_ID_RE = /^cl_[a-z0-9]{10}$/;
 export const OPTION_ID_RE = /^op_[a-z0-9]{10}$/;
-const OPTION_MIN = 2;
-const OPTION_MAX = 5;
+const OPTION_MAX = 2;
 const LABEL_MAX = 80;
 const ID_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789';
 
@@ -231,17 +232,28 @@ function optionIdsIn(doc) {
   return ids;
 }
 
-const emptyOption = (taken) => ({ id: newId('op', taken), label: '', qualifies: false });
+const emptyOption = (taken) => ({ id: newId('op', taken), label: '' });
+
+/**
+ * The qualifying option implied by the option count: none without options,
+ * the only option with one, otherwise the current choice if it still names
+ * one of the options (else null: the admin must choose). Never inferred
+ * from labels or order.
+ */
+export function qualifyingFor(options, current) {
+  if (!options.length) return null;
+  if (options.length === 1) return options[0].id;
+  return options.some((o) => o.id === current) ? current : null;
+}
 
 /** Options from pasted/serialized HTML: shape only (validated again on save); null if unusable. */
 function parseOptions(raw) {
   let list;
   try { list = JSON.parse(raw || ''); } catch (_) { return null; }
-  if (!Array.isArray(list) || !list.length || list.length > 20) return null;
+  if (!Array.isArray(list) || list.length > 20) return null;
   return list.map((o) => ({
     id: o && typeof o.id === 'string' ? o.id : '',
     label: o && typeof o.label === 'string' ? o.label.slice(0, 200) : '',
-    qualifies: Boolean(o && o.qualifies === true),
   }));
 }
 
@@ -269,13 +281,21 @@ function h(tag, attrs, ...kids) {
   return el;
 }
 
+/** Short state shown in the clause head and above the options. */
+function clauseState(count) {
+  if (!count) return 'Informasi saja';
+  if (count === 1) return 'Pilihan ini otomatis memenuhi syarat';
+  return 'Pengguna harus memilih pilihan yang memenuhi syarat';
+}
+
 /**
- * Editing view of a clause: read-only head (kind, required state, ID), the
+ * Editing view of a clause: read-only head (kind, behaviour, ID), the
  * editable title/text (contentDOM), and a form for the answer options:
- * label inputs, “Memenuhi persyaratan” checkboxes (required clauses only),
- * move up/down, remove, and add. Every change is one editor transaction
- * (undoable). `issuesOf(options, required)` gives inline messages (the same
- * rules as js/richtext.js).
+ * label inputs, move up/down, remove, add (at most two), and — with two or
+ * more options — the single-choice “Pilihan yang memenuhi syarat”. Every
+ * change is one editor transaction (undoable). `issuesOf(options,
+ * qualifyingOptionId)` gives inline messages (the same rules as
+ * js/richtext.js).
  */
 class ClauseView {
   constructor(node, getPos, editor, issuesOf) {
@@ -291,12 +311,14 @@ class ClauseView {
     this.head = h('div', { class: 'clause-edit-head', contenteditable: 'false' }, this.tagEl, this.reqEl, this.idEl);
     this.contentDOM = h('div', { class: 'clause-edit-content' });
     this.list = h('ol', { class: 'clause-opts' });
+    this.qualSet = h('fieldset', { class: 'clause-qual' });
     this.addBtn = h('button', { type: 'button', class: 'clause-opt-add', 'data-role': 'add' }, '+ Tambah pilihan');
+    this.state = h('p', { class: 'clause-opts-state' });
     this.hint = h('p', { class: 'clause-opts-hint' });
     this.clauseErr = h('p', { class: 'clause-opts-err' });
     this.legend = h('p', { class: 'clause-opts-h' }, 'Pilihan jawaban');
     this.panel = h('div', { class: 'clause-edit-options', contenteditable: 'false', role: 'group' },
-      this.legend, this.hint, this.list, this.addBtn, this.clauseErr);
+      this.legend, this.state, this.hint, this.list, this.qualSet, this.addBtn, this.clauseErr);
     this.dom = h('section', { class: 'clause-edit' }, this.head, this.contentDOM, this.panel);
     this.panel.addEventListener('input', (ev) => this.onInput(ev));
     this.panel.addEventListener('change', (ev) => this.onChange(ev));
@@ -308,11 +330,13 @@ class ClauseView {
 
   get options() { return Array.isArray(this.node.attrs.options) ? this.node.attrs.options : []; }
 
-  setOptions(next, focusAfter) {
+  /** One transaction: new options and the qualifying option they imply (`choice` = admin's pick). */
+  setOptions(next, focusAfter, choice) {
     const pos = this.getPos();
     if (typeof pos !== 'number') return;
     this.focusAfter = focusAfter || null;
-    this.editor.view.dispatch(this.editor.state.tr.setNodeMarkup(pos, undefined, { ...this.node.attrs, options: next }));
+    const qualifyingOptionId = qualifyingFor(next, choice === undefined ? this.node.attrs.qualifyingOptionId : choice);
+    this.editor.view.dispatch(this.editor.state.tr.setNodeMarkup(pos, undefined, { ...this.node.attrs, options: next, qualifyingOptionId }));
   }
 
   rowOf(el) {
@@ -329,13 +353,16 @@ class ClauseView {
   }
 
   onChange(ev) {
+    if (ev.target.dataset.role === 'qualifying') {
+      if (ev.target.checked && ev.target.value !== this.node.attrs.qualifyingOptionId) {
+        this.setOptions(this.options, { id: ev.target.value, role: 'qualifying' }, ev.target.value);
+      }
+      return;
+    }
     const i = this.rowOf(ev.target);
     if (i == null) return;
-    const o = this.options[i];
     if (ev.target.dataset.role === 'label' && ev.target.value.trim() !== ev.target.value) {
       this.setOptions(this.options.map((x, j) => (j === i ? { ...x, label: ev.target.value.trim() } : x)));
-    } else if (ev.target.dataset.role === 'qualifies' && ev.target.checked !== o.qualifies) {
-      this.setOptions(this.options.map((x, j) => (j === i ? { ...x, qualifies: ev.target.checked } : x)), { id: o.id, role: 'qualifies' });
     }
   }
 
@@ -353,10 +380,10 @@ class ClauseView {
     const i = this.rowOf(btn);
     if (i == null) return;
     const id = opts[i].id;
-    if (role === 'remove' && opts.length > OPTION_MIN) {
+    if (role === 'remove') {
       opts.splice(i, 1);
       const next = opts[i] || opts[i - 1];
-      this.setOptions(opts, { id: next.id, role: 'remove', fallback: 'label' });
+      this.setOptions(opts, next ? { id: next.id, role: 'remove', fallback: 'label' } : { add: true });
     } else if (role === 'up' && i > 0) {
       [opts[i - 1], opts[i]] = [opts[i], opts[i - 1]];
       this.setOptions(opts, { id, role: 'up', fallback: 'down' });
@@ -367,20 +394,25 @@ class ClauseView {
   }
 
   render() {
-    const { clauseId, required } = this.node.attrs;
+    const { clauseId, qualifyingOptionId } = this.node.attrs;
     const opts = this.options;
-    this.dom.className = 'clause-edit' + (required ? ' clause-required' : '');
-    this.reqEl.textContent = required ? 'Wajib dijawab' : 'Opsional';
-    this.idEl.textContent = `ID ${clauseId || '(baru)'}`;
     const base = 'ed-' + (clauseId || 'baru');
+    this.dom.className = 'clause-edit' + (opts.length ? ' clause-required' : ' clause-info-edit');
+    this.reqEl.textContent = opts.length ? 'Wajib dijawab' : 'Informasi saja';
+    this.idEl.textContent = `ID ${clauseId || '(baru)'}`;
     this.legend.id = base + '-opts-h';
+    this.state.id = base + '-opts-state';
     this.hint.id = base + '-opts-hint';
     this.panel.setAttribute('aria-labelledby', this.legend.id);
-    this.hint.textContent = required
-      ? `${OPTION_MIN}–${OPTION_MAX} pilihan; pengguna memilih tepat satu, tanpa pilihan bawaan. Hanya pilihan bertanda “Memenuhi persyaratan” yang memungkinkan persetujuan; arti pilihan tidak ditentukan dari labelnya.`
-      : `${OPTION_MIN}–${OPTION_MAX} pilihan; pengguna memilih tepat satu atau tidak menjawab. Klausul opsional: pilihan apa pun dicatat tanpa menghalangi persetujuan.`;
+    this.panel.setAttribute('aria-describedby', `${this.state.id} ${this.hint.id}`);
+    this.state.textContent = clauseState(opts.length);
+    this.hint.textContent = !opts.length
+      ? 'Tanpa pilihan jawaban, klausul tampil sebagai informasi biasa dan tidak menghalangi persetujuan. Tambahkan 1–2 pilihan bila pengguna harus menjawab.'
+      : opts.length === 1
+        ? 'Pengguna tetap harus memilihnya sendiri sebelum menyetujui; tidak ada pilihan bawaan.'
+        : `Maksimal ${OPTION_MAX} pilihan. Tentukan tepat satu pilihan yang memenuhi syarat; arti pilihan tidak ditentukan dari label atau urutannya. Pengguna memilih sendiri, tanpa pilihan bawaan.`;
 
-    const key = JSON.stringify([clauseId, required, opts.map((o) => o.id)]);
+    const key = JSON.stringify([clauseId, opts.map((o) => o.id)]);
     if (key !== this.key) {
       this.key = key;
       this.list.replaceChildren(...opts.map((o, i) => {
@@ -390,30 +422,40 @@ class ClauseView {
         return h('li', { class: 'clause-opt', 'data-option-id': o.id },
           h('label', { class: 'clause-opt-lab', for: id + '-label' }, `Pilihan ${n}`),
           h('input', { type: 'text', id: id + '-label', class: 'clause-opt-input', 'data-role': 'label', maxlength: String(LABEL_MAX + 20), autocomplete: 'off', 'aria-describedby': id + '-err' }),
-          required ? h('label', { class: 'clause-opt-q', for: id + '-q' },
-            h('input', { type: 'checkbox', id: id + '-q', 'data-role': 'qualifies', 'aria-describedby': this.hint.id || null }), ' Memenuhi persyaratan') : '',
           h('span', { class: 'clause-opt-actions' },
             btn('up', 'Naikkan', '↑'), btn('down', 'Turunkan', '↓'), btn('remove', 'Hapus', 'Hapus')),
           h('p', { class: 'clause-opt-err', id: id + '-err' }));
       }));
+      // Single choice of the qualifying option (only with two or more options).
+      const legendId = base + '-qual-h';
+      this.qualSet.replaceChildren(...(opts.length >= 2 ? [
+        h('legend', { id: legendId }, 'Pilihan yang memenuhi syarat'),
+        ...opts.map((o) => h('label', { class: 'clause-qual-opt', for: `${base}-${o.id}-q` },
+          h('input', { type: 'radio', id: `${base}-${o.id}-q`, name: `${base}-qualifying`, value: o.id, 'data-role': 'qualifying' }),
+          h('span', {}))),
+      ] : []));
+      this.qualSet.hidden = opts.length < 2;
     }
     // Sync values in place, so typing never loses focus.
-    const issues = this.issuesOf(opts, required) || [];
+    const issues = this.issuesOf(opts, qualifyingOptionId === undefined ? null : qualifyingOptionId) || [];
     this.list.querySelectorAll('li[data-option-id]').forEach((li, i) => {
       const o = opts[i];
       const input = li.querySelector('[data-role="label"]');
       if (input.value !== o.label && input.ownerDocument.activeElement !== input) input.value = o.label;
-      const q = li.querySelector('[data-role="qualifies"]');
-      if (q) q.checked = o.qualifies === true;
       const msgs = issues.filter((x) => x.index === i && x.message).map((x) => x.message);
       li.querySelector('.clause-opt-err').textContent = msgs.join(' ');
       input.setAttribute('aria-invalid', String(msgs.length > 0));
       li.querySelector('[data-role="up"]').disabled = i === 0;
       li.querySelector('[data-role="down"]').disabled = i === opts.length - 1;
-      li.querySelector('[data-role="remove"]').disabled = opts.length <= OPTION_MIN;
     });
-    this.addBtn.disabled = opts.length >= OPTION_MAX;
-    this.addBtn.textContent = opts.length >= OPTION_MAX ? `Maksimal ${OPTION_MAX} pilihan` : '+ Tambah pilihan';
+    this.qualSet.querySelectorAll('input[data-role="qualifying"]').forEach((r, i) => {
+      r.checked = r.value === qualifyingOptionId;
+      const label = (opts[i].label || '').trim();
+      r.nextElementSibling.textContent = label ? `Pilihan ${i + 1}: ${label}` : `Pilihan ${i + 1} (belum diberi label)`;
+    });
+    const full = opts.length >= OPTION_MAX;
+    this.addBtn.disabled = full;
+    this.addBtn.textContent = full ? `Maksimal ${OPTION_MAX} pilihan` : '+ Tambah pilihan';
     this.clauseErr.textContent = issues.filter((x) => x.index == null && x.message).map((x) => x.message).join(' ');
     this.restoreFocus();
   }
@@ -422,8 +464,11 @@ class ClauseView {
     const f = this.focusAfter;
     this.focusAfter = null;
     if (!f) return;
+    if (f.add) { this.addBtn.focus(); return; }
     const li = this.list.querySelector(`li[data-option-id="${f.id}"]`);
-    const pick = (role) => (li ? li.querySelector(`[data-role="${role}"]`) : null);
+    const pick = (role) => (role === 'qualifying'
+      ? this.qualSet.querySelector(`input[value="${f.id}"]`)
+      : li ? li.querySelector(`[data-role="${role}"]`) : null);
     let el = pick(f.role);
     if (!el || el.disabled) el = pick(f.fallback);
     if (!el || el.disabled) el = pick('label') || this.addBtn;
@@ -465,15 +510,15 @@ const ConsentClause = Node.create({
         },
         renderHTML: (attrs) => ({ 'data-clause-id': attrs.clauseId }),
       },
-      required: {
-        default: true,
-        parseHTML: (el) => el.getAttribute('data-required') !== 'false',
-        renderHTML: (attrs) => ({ 'data-required': String(attrs.required) }),
-      },
       options: {
         default: null,
         parseHTML: (el) => parseOptions(el.getAttribute('data-options')),
         renderHTML: (attrs) => (Array.isArray(attrs.options) ? { 'data-options': JSON.stringify(attrs.options) } : {}),
+      },
+      qualifyingOptionId: {
+        default: null,
+        parseHTML: (el) => el.getAttribute('data-qualifying') || null,
+        renderHTML: (attrs) => (attrs.qualifyingOptionId ? { 'data-qualifying': attrs.qualifyingOptionId } : {}),
       },
     };
   },
@@ -482,12 +527,11 @@ const ConsentClause = Node.create({
 
   // Serialized form (clipboard); the editor itself shows ClauseView.
   renderHTML({ node, HTMLAttributes }) {
-    const req = node.attrs.required;
     const opts = Array.isArray(node.attrs.options) ? node.attrs.options : [];
-    return ['section', mergeAttributes(HTMLAttributes, { class: 'clause-edit' + (req ? ' clause-required' : '') }),
+    return ['section', mergeAttributes(HTMLAttributes, { class: 'clause-edit' }),
       ['div', { class: 'clause-edit-head', contenteditable: 'false' },
         ['span', { class: 'clause-edit-tag' }, 'Klausul persetujuan'],
-        ['span', { class: 'clause-edit-req' }, req ? 'Wajib dijawab' : 'Opsional']],
+        ['span', { class: 'clause-edit-req' }, opts.length ? 'Wajib dijawab' : 'Informasi saja']],
       ['div', { class: 'clause-edit-content' }, 0],
       ['ul', { class: 'clause-edit-options', contenteditable: 'false' }, ...opts.map((o) => ['li', {}, o.label])]];
   },
@@ -498,13 +542,14 @@ const ConsentClause = Node.create({
   },
 
   addCommands() {
+    const current = (state) => findParentNode((n) => n.type.name === 'consentClause')(state.selection);
     return {
+      // A new clause starts as information only; options are added in its form.
       insertConsentClause: () => ({ tr, dispatch, editor, state }) => {
-        if (findParentNode((n) => n.type.name === 'consentClause')(state.selection)) return false;
-        const takenOpts = optionIdsIn(state.doc);
+        if (current(state)) return false;
         const node = editor.schema.nodeFromJSON({
           type: 'consentClause',
-          attrs: { clauseId: newId('cl', clauseIdsIn(state.doc)), required: true, options: [emptyOption(takenOpts), emptyOption(takenOpts)] },
+          attrs: { clauseId: newId('cl', clauseIdsIn(state.doc)), options: [], qualifyingOptionId: null },
           content: [{ type: 'clauseTitle' }, { type: 'clauseBody', content: [{ type: 'paragraph' }] }],
         });
         if (dispatch) {
@@ -514,14 +559,19 @@ const ConsentClause = Node.create({
         }
         return true;
       },
-      toggleClauseRequired: () => ({ state, tr, dispatch }) => {
-        const found = findParentNode((n) => n.type.name === 'consentClause')(state.selection);
+      // Inserts a copy below; the ID plugin gives it a fresh clause ID and fresh option IDs.
+      duplicateConsentClause: () => ({ state, tr, dispatch }) => {
+        const found = current(state);
         if (!found) return false;
-        if (dispatch) tr.setNodeMarkup(found.pos, undefined, { ...found.node.attrs, required: !found.node.attrs.required });
+        if (dispatch) {
+          const end = found.pos + found.node.nodeSize;
+          tr.insert(end, found.node.copy(found.node.content));
+          tr.setSelection(TextSelection.near(tr.doc.resolve(end + 2))).scrollIntoView();
+        }
         return true;
       },
       deleteConsentClause: () => ({ state, tr, dispatch }) => {
-        const found = findParentNode((n) => n.type.name === 'consentClause')(state.selection);
+        const found = current(state);
         if (!found) return false;
         if (dispatch) tr.delete(found.pos, found.pos + found.node.nodeSize);
         return true;
@@ -532,10 +582,12 @@ const ConsentClause = Node.create({
   addProseMirrorPlugins() {
     return [
       // Stable, unique IDs: a clause keeps its ID unless another clause in the
-      // document already owns it (e.g. after copy-paste duplication), in which
-      // case the newcomer gets a fresh clause ID and fresh option IDs. Missing,
-      // invalid, or duplicate option IDs are replaced; a clause without usable
-      // options gets two empty ones. Renaming or reordering keeps IDs.
+      // document already owns it (e.g. after duplication or copy-paste), in
+      // which case the newcomer gets a fresh clause ID and fresh option IDs
+      // (its qualifying option follows to the new ID). Missing, invalid, or
+      // duplicate option IDs are replaced; missing options become none. The
+      // qualifying option always matches the option count (qualifyingFor).
+      // Renaming or reordering keeps IDs.
       new Plugin({
         key: new PluginKey('clauseIds'),
         appendTransaction: (trs, oldState, newState) => {
@@ -563,18 +615,22 @@ const ConsentClause = Node.create({
             const attrs = { ...n.attrs };
             let changed = false;
             if (fresh) { attrs.clauseId = newId('cl', taken); changed = true; }
-            if (!Array.isArray(attrs.options) || !attrs.options.length) {
-              attrs.options = [emptyOption(takenOpts), emptyOption(takenOpts)];
+            let q = attrs.qualifyingOptionId;
+            if (!Array.isArray(attrs.options)) {
+              attrs.options = [];
               changed = true;
             } else {
               attrs.options = attrs.options.map((o) => {
                 if (!fresh && OPTION_ID_RE.test(o.id || '') && !seenOpts.has(o.id)) { seenOpts.add(o.id); return o; }
                 changed = true;
                 const copy = { ...o, id: newId('op', takenOpts) };
+                if (q === o.id) q = copy.id;
                 seenOpts.add(copy.id);
                 return copy;
               });
             }
+            q = qualifyingFor(attrs.options, q);
+            if (q !== attrs.qualifyingOptionId) { attrs.qualifyingOptionId = q; changed = true; }
             if (changed) fixes.push([pos, attrs]);
           });
           if (!fixes.length) return null;

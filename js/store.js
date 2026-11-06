@@ -13,6 +13,10 @@
  *   readable in versions, drafts, and snapshots, but new content cannot be
  *   saved or published with them. They become configurable options only
  *   through the explicit convertLegacyDraft action (a new editable draft).
+ * - Clauses written for format 4 (2–5 options, `required`, per-option
+ *   `qualifies`) are likewise read-only history: saving or publishing content
+ *   that still holds them is refused. The editor maps them for explicit
+ *   editing and the admin corrects them; nothing is removed automatically.
  * - Nothing is ever deleted.
  * - Every template carries a `lockVersion` that increases on each successful
  *   save, publication, and archival. Each mutation must name the lockVersion
@@ -61,6 +65,13 @@
   }
 
   const FIXED_CLAUSES_MESSAGE = 'Dokumen memuat klausul persetujuan dengan pilihan tetap “Tidak / Ya” (format lama). Buat draf baru dengan pilihan yang dapat diatur melalui konversi eksplisit.';
+  const OLD_CLAUSES_MESSAGE = 'Dokumen memuat klausul persetujuan dengan aturan pilihan lama (format 4). Buka draf di editor, sesuaikan setiap klausul (0–2 pilihan, satu pilihan yang memenuhi syarat), lalu simpan.';
+
+  /** Format-3/4 clauses are readable history only; new content must use the current clause rules. */
+  function legacyClauseMessage(content) {
+    if (RT.fixedClauseCount(content)) return FIXED_CLAUSES_MESSAGE;
+    return RT.legacyClauseCount(content) ? OLD_CLAUSES_MESSAGE : null;
+  }
 
   function statusOf(t) {
     if (t.archived) return 'archived';
@@ -148,7 +159,8 @@
       content: input.content,
     };
     const errors = RT.validateDraft(fields);
-    if (!errors.length && RT.fixedClauseCount(fields.content)) errors.push({ field: 'content', kind: 'format', message: FIXED_CLAUSES_MESSAGE });
+    const legacyClauses = errors.length ? null : legacyClauseMessage(fields.content);
+    if (legacyClauses) errors.push({ field: 'content', kind: 'format', message: legacyClauses });
     if (errors.length) throw new StoreError('INVALID', 'Draf tidak valid.', { errors });
 
     let t;
@@ -231,7 +243,8 @@
     if (formatOf(t.draft) !== RT.FORMAT) {
       throw new StoreError('LEGACY_FORMAT', 'Draf Markdown lama harus dikonversi ke editor visual sebelum diterbitkan.');
     }
-    if (RT.fixedClauseCount(t.draft.content)) throw new StoreError('LEGACY_FORMAT', FIXED_CLAUSES_MESSAGE);
+    const legacyClauses = legacyClauseMessage(t.draft.content);
+    if (legacyClauses) throw new StoreError('LEGACY_FORMAT', legacyClauses);
     const errors = validateRecord(t.internalName, t.draft);
     if (errors.length) throw new StoreError('INVALID', 'Draf belum dapat diterbitkan.', { errors });
 
@@ -365,7 +378,7 @@
 
   /*
    * Editable sample draft for the label–value table preset and consent
-   * clauses (one required, one optional). Every company
+   * clauses with zero, one, and two options. Every company
    * detail and name is fictional static text (no placeholders, no lookups).
    */
   function profileSampleJson() {
@@ -380,10 +393,10 @@
       ],
     });
     const kv = (...rows) => ({ type: 'table', attrs: { preset: 'labelValue', labelWidth: 25 }, content: rows });
-    // Consent clauses: fixed sample IDs; options [id, label, qualifies].
-    const clause = (clauseId, required, options, title, ...body) => ({
+    // Consent clauses (format 5): fixed sample IDs; options [id, label].
+    const clause = (clauseId, options, qualifyingOptionId, title, ...body) => ({
       type: 'consentClause',
-      attrs: { clauseId, required, options: options.map(([id, label, qualifies]) => ({ id, label, qualifies })) },
+      attrs: { clauseId, options: options.map(([id, label]) => ({ id, label })), qualifyingOptionId },
       content: [{ type: 'clauseTitle', content: [text(title)] }, { type: 'clauseBody', content: body.map((x) => para(x)) }],
     });
     return RT.freezeCopy(RT.wrap({
@@ -410,18 +423,18 @@
           row('Direktur', 'Sari Contoh'),
           row('Komisaris', 'Rudi Contoh'),
         ),
-        clause('cl_bacaprofil', true, [['op_sudahbaca1', 'Sudah membaca', true], ['op_belumbaca1', 'Belum membaca', false]],
+        // 0 options: information only.
+        clause('cl_infodata01', [], null,
+          'Informasi pengolahan data',
+          'Data pada dokumen ini hanya dipakai untuk simulasi dan tidak dikirim ke mana pun. Bagian ini hanya informasi dan tidak perlu dijawab. (Contoh fiktif.)'),
+        // 1 option: it qualifies automatically, but the user must still select it.
+        clause('cl_bacaprofil', [['op_sudahbaca1', 'Saya sudah membaca profil perusahaan']], 'op_sudahbaca1',
           'Pernyataan telah membaca profil perusahaan',
-          'Nyatakan apakah Anda telah membaca dan memahami profil perusahaan di atas, termasuk susunan pengurus perusahaan. (Contoh fiktif.)'),
-        clause('cl_risikolyn1', true, [
-          ['op_terima0001', 'Memahami dan menerima', true],
-          ['op_konsul0001', 'Memahami, akan berkonsultasi dahulu', true],
-          ['op_belumpaham', 'Belum memahami', false],
-        ], 'Pemahaman ketentuan layanan',
-          'Dua pilihan pertama memenuhi persyaratan; “Belum memahami” tidak. (Contoh fiktif.)'),
-        clause('cl_infolanjut', false, [['op_bersedia01', 'Bersedia', false], ['op_tdksedia01', 'Tidak bersedia', false]],
-          'Kesediaan menerima informasi lanjutan',
-          'Pilihan ini opsional dan tidak memengaruhi persetujuan dokumen. (Contoh fiktif.)'),
+          'Nyatakan bahwa Anda telah membaca dan memahami profil perusahaan di atas, termasuk susunan pengurus perusahaan. (Contoh fiktif.)'),
+        // 2 options: exactly one qualifies (here the second, so order implies nothing).
+        clause('cl_risikolyn1', [['op_belumpaham', 'Belum memahami'], ['op_terima0001', 'Memahami dan menerima']], 'op_terima0001',
+          'Pemahaman ketentuan layanan',
+          'Hanya “Memahami dan menerima” yang memungkinkan persetujuan. (Contoh fiktif.)'),
       ],
     }));
   }
@@ -526,7 +539,7 @@
   }
 
   const api = {
-    StoreError, generateCode, generateId, legacyKind, statusOf, latestVersion, getTemplate, assertLock, formatOf, validateRecord,
+    StoreError, generateCode, generateId, legacyKind, legacyClauseMessage, statusOf, latestVersion, getTemplate, assertLock, formatOf, validateRecord,
     saveDraft, convertLegacyDraft, publishDraft, archiveTemplate, simulateExternalEdit, createSeedState,
   };
   if (typeof module === 'object' && module.exports) module.exports = api;

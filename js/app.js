@@ -492,14 +492,19 @@
     const legacy = kind
       ? { kind, draft: Boolean(t.draft), label: t.draft ? `Draf revisi ${t.draft.revision}` : `Versi ${latest.number}` }
       : null;
+    // Clauses written for format 4 are mapped to the current rules for this
+    // explicit edit; nothing is removed, and the admin corrects what remains
+    // ambiguous (more than two options, no single qualifying option).
+    const editable = src && !legacy ? RT.editableClauses(src.content) : { content: RT.emptyContent(), migrated: 0 };
     const fields = {
       internalName: t.internalName,
       title: src ? src.title : '',
-      content: src && !legacy ? src.content : RT.emptyContent(),
+      content: editable.content,
     };
     return {
-      ...common, key: 'edit:' + t.id, templateId: t.id, code: t.code, legacy,
-      ...fields, orig: origOf(fields),
+      ...common, key: 'edit:' + t.id, templateId: t.id, code: t.code, legacy, clauseMigration: editable.migrated,
+      // The mapped clauses are an unsaved change until the admin saves them.
+      ...fields, orig: origOf(editable.migrated ? { ...fields, content: src.content } : fields),
       // What this editor loaded. lockVersion guards every mutation; the draft
       // revision and source version are only shown to the admin.
       baseRevision: t.draft ? t.draft.revision : null,
@@ -555,6 +560,12 @@
         <div id="save-state" class="save-state" role="status"></div>
       </div>
       ${permNotice()}
+      ${e.clauseMigration ? `
+        <section class="callout callout-warn" id="clause-migration" aria-labelledby="clause-migration-h">
+          <h2 id="clause-migration-h">Klausul memakai aturan lama</h2>
+          <p>${e.clauseMigration} klausul persetujuan di dokumen ini dibuat dengan aturan pilihan lama (2–5 pilihan, “Wajib dijawab”, beberapa pilihan dapat memenuhi persyaratan). Sesuai aturan baru, setiap klausul memiliki 0–2 pilihan: tanpa pilihan berarti informasi saja, dan klausul berpilihan memiliki tepat satu pilihan yang memenuhi syarat.</p>
+          <p>Tidak ada pilihan yang dihapus otomatis. Perbaiki klausul yang ditandai, lalu simpan. Versi terbit, dokumen yang sudah ditugaskan, dan persetujuan yang sudah dicatat tidak berubah.</p>
+        </section>` : ''}
       <div id="conflict-slot"></div>
       <div id="error-summary-slot"></div>
       <form id="editor-form" class="editor-form" novalidate>
@@ -598,13 +609,13 @@
                 <li>Daftar berpoin dan bernomor; <kbd>Tab</kbd>/<kbd>Shift</kbd>+<kbd>Tab</kbd> mengubah tingkat butir</li>
                 <li>Tabel dengan baris header; di dalam tabel <kbd>Tab</kbd> berpindah sel</li>
                 <li>Tabel label–nilai: dua kolom tetap (label di kiri, nilai di kanan), baris dapat ditambah/dihapus, lebar kolom label 20%, 25%, atau 30%. Kolom tidak dapat ditambah, dihapus, atau digabung.</li>
-                <li>Klausul persetujuan: judul (teks biasa), penjelasan (paragraf dan daftar), pengaturan “Wajib dijawab” (aktif secara bawaan), dan ${RT.OPTION_LIMITS.min}–${RT.OPTION_LIMITS.max} pilihan jawaban. Setiap pilihan memiliki label teks biasa (unik, tanpa HTML atau placeholder, maksimal ${RT.OPTION_LIMITS.label} karakter) dan, untuk klausul wajib, pengaturan “Memenuhi persyaratan” (minimal satu pilihan). Pilihan dapat ditambah, dihapus, dan diurutkan dengan tombol ↑/↓; pengguna memilih tepat satu, tanpa jawaban bawaan. Arti pilihan hanya ditentukan oleh pengaturan, bukan oleh labelnya. ID klausul dan pilihan dibuat otomatis; klausul tidak dapat ditempatkan di dalam klausul, daftar, atau tabel. <kbd>Enter</kbd> pada judul berpindah ke penjelasan.</li>
+                <li>Klausul persetujuan: judul (teks biasa), penjelasan (paragraf dan daftar), dan 0–${RT.CLAUSE_OPTION_MAX} pilihan jawaban. Tanpa pilihan: informasi saja, tidak menghalangi persetujuan. Satu pilihan: otomatis memenuhi syarat, tetapi pengguna tetap harus memilihnya. Dua pilihan: tentukan tepat satu “Pilihan yang memenuhi syarat”. Setiap pilihan memiliki label teks biasa (unik, tanpa HTML atau placeholder, maksimal ${RT.OPTION_LIMITS.label} karakter). Pilihan dapat ditambah, dihapus, diganti namanya, dan diurutkan dengan tombol ↑/↓; pengguna memilih sendiri, tanpa jawaban bawaan. Arti pilihan hanya ditentukan oleh pengaturan, bukan oleh label atau urutannya. ID klausul dan pilihan dibuat otomatis; “Duplikat” membuat salinan dengan ID baru. Klausul tidak dapat ditempatkan di dalam klausul, daftar, atau tabel. <kbd>Enter</kbd> pada judul berpindah ke penjelasan.</li>
                 <li>Urungkan (<kbd>Ctrl</kbd>+<kbd>Z</kbd>) dan ulangi (<kbd>Ctrl</kbd>+<kbd>Y</kbd>)</li>
                 <li>Placeholder hanya dari katalog sistem, tampil sebagai label (mis. “Nama lengkap”). Placeholder dapat disisipkan atau dihapus, tetapi kuncinya tidak dapat diubah.</li>
                 <li><kbd>Esc</kbd> atau <kbd>Alt</kbd>+<kbd>F10</kbd>: pindah ke toolbar. Di toolbar, gunakan tombol panah; <kbd>Esc</kbd> kembali ke isi dokumen.</li>
               </ul>
               <p><strong>Tidak didukung:</strong> gambar, tautan, skrip, gaya/warna, dan sel gabungan. Isi tempelan dibatasi ke format di atas. Nilai placeholder selalu tampil sebagai teks biasa.</p>
-              <p>Isi disimpan sebagai JSON terstruktur (format <code>${RT.FORMAT}</code> versi ${RT.FORMAT_VERSIONS.join(', ')}; versi 2 bila dokumen memuat tabel label–nilai, versi 4 bila memuat klausul persetujuan; versi 3 hanya untuk klausul “Tidak / Ya” lama). Ukuran maksimal ${RT.LIMITS.contentJson.toLocaleString('id-ID')} karakter JSON; isi tidak pernah dipotong otomatis.</p>
+              <p>Isi disimpan sebagai JSON terstruktur (format <code>${RT.FORMAT}</code> versi ${RT.FORMAT_VERSIONS.join(', ')}; versi 2 bila dokumen memuat tabel label–nilai, versi 5 bila memuat klausul persetujuan; versi 3 dan 4 hanya untuk klausul lama). Ukuran maksimal ${RT.LIMITS.contentJson.toLocaleString('id-ID')} karakter JSON; isi tidak pernah dipotong otomatis.</p>
             </details>
           </div>
           <section class="preview-col" id="preview-col" aria-labelledby="preview-h">
@@ -647,7 +658,7 @@
         <h2 id="convert-h">Lanjutkan di editor visual</h2>
         <p>Editor visual menyimpan isi sebagai JSON terstruktur. “Buat draf editor visual” membuat <strong>salinan JSON yang dapat diedit</strong> dari ${esc(what)}.</p>` : `
         <h2 id="convert-h">Ubah ke pilihan jawaban yang dapat diatur</h2>
-        <p>Klausul lama selalu memakai pilihan “Tidak” dan “Ya”, dan klausul wajib harus dijawab “Ya”. “Buat draf dengan pilihan yang dapat diatur” membuat <strong>draf baru yang dapat diedit</strong> dari ${esc(what)}: setiap klausul mendapat pilihan “Tidak” dan “Ya” (ID pilihan baru), dengan hanya “Ya” bertanda “Memenuhi persyaratan” — sama dengan aturan lama. Setelah itu label, urutan, dan persyaratan dapat diubah.</p>`}
+        <p>Klausul lama selalu memakai pilihan “Tidak” dan “Ya”, dan klausul wajib harus dijawab “Ya”. “Buat draf dengan pilihan yang dapat diatur” membuat <strong>draf baru yang dapat diedit</strong> dari ${esc(what)}: setiap klausul mendapat pilihan “Tidak” dan “Ya” (ID pilihan baru), dengan hanya “Ya” bertanda “Memenuhi persyaratan” — sama dengan aturan lama. Setelah itu, sesuaikan setiap klausul di editor dengan aturan pilihan saat ini (0–2 pilihan, tepat satu pilihan yang memenuhi syarat) sebelum menyimpan atau menerbitkan.</p>`}
         <ul class="checklist">
           <li>${e.legacy.draft
             ? (md ? 'Isi draf Markdown diganti dengan salinan JSON yang setara, dan nomor revisi draf bertambah.' : 'Isi draf diganti dengan salinan yang klausulnya dapat diatur, dan nomor revisi draf bertambah.')
@@ -746,7 +757,7 @@
     kvWidth25: kvWidth(25),
     kvWidth30: kvWidth(30),
     insertClause: { run: (c) => c.insertConsentClause(), block: true },
-    clauseRequired: { run: (c) => c.toggleClauseRequired(), active: (ed) => ed.isActive('consentClause', { required: true }), clause: true },
+    duplicateClause: { run: (c) => c.duplicateConsentClause(), clause: true },
     deleteClause: { run: (c) => c.deleteConsentClause(), clause: true },
   };
 
@@ -783,7 +794,7 @@
         ${group('Tabel label–nilai', tool('insertKvTable', 'Tabel label–nilai', icon('insertKvTable') + '<span class="tool-text">Tabel label–nilai</span>') +
           tool('kvWidth20', 'Lebar kolom label 20%', '20%') + tool('kvWidth25', 'Lebar kolom label 25%', '25%') + tool('kvWidth30', 'Lebar kolom label 30%', '30%'))}
         ${group('Klausul persetujuan', tool('insertClause', 'Klausul persetujuan', icon('insertClause') + '<span class="tool-text">Klausul persetujuan</span>') +
-          tool('clauseRequired', 'Wajib dijawab', 'Wajib dijawab') + tool('deleteClause', 'Hapus klausul', 'Hapus klausul'))}
+          tool('duplicateClause', 'Duplikat klausul', 'Duplikat') + tool('deleteClause', 'Hapus klausul', 'Hapus klausul'))}
         <div class="tool-group" role="group" aria-label="Placeholder">
           <div class="ph-wrap">
             <button type="button" class="tool tool-ph" tabindex="-1" id="ph-btn" data-action="ph-toggle" aria-haspopup="menu" aria-expanded="false" aria-controls="ph-menu">Sisipkan placeholder ▾</button>
@@ -852,7 +863,7 @@
         element: holder,
         content: JSON.parse(JSON.stringify(e.content.document)),
         catalogue: MD.PLACEHOLDERS,
-        optionIssues: RT.optionIssues,
+        optionIssues: RT.clauseOptionIssues,
         attributes: {
           id: 'f-content', class: 'rte-content', role: 'textbox', 'aria-multiline': 'true',
           'aria-labelledby': 'content-label', 'aria-describedby': 'content-help err-content', 'aria-required': 'true',
@@ -1133,8 +1144,9 @@
     if (!t.draft) return;
     const d = t.draft;
     const n = t.versions.length + 1;
+    const legacyClauses = S.formatOf(d) === RT.FORMAT ? S.legacyClauseMessage(d.content) : null;
     const errors = S.formatOf(d) === RT.FORMAT
-      ? S.validateRecord(t.internalName, d)
+      ? S.validateRecord(t.internalName, d).concat(legacyClauses ? [{ message: legacyClauses }] : [])
       : [{ message: 'Draf Markdown lama harus dikonversi ke editor visual terlebih dahulu (Edit draf → Buat draf editor visual).' }];
     const previous = n === 1 ? 'Ini akan menjadi versi terbit pertama.'
       : `${n === 2 ? 'Versi 1' : `Versi 1–${n - 1}`} tetap tersimpan di riwayat.`;
@@ -1309,7 +1321,7 @@
 
   /** Recorded answers next to the acceptance (read-only). */
   function recordedAnswersHtml(s, acc) {
-    const clauses = clausesOf(s);
+    const clauses = U.answerableClauses(s); // information-only clauses have no answer
     if (!clauses.length) return '';
     if (!acc.answers) return '<p>Jawaban klausul tidak tercatat untuk persetujuan ini.</p>';
     return `
@@ -1323,7 +1335,7 @@
     const s = a.snapshot;
     const acc = U.acceptanceFor(app.user, a);
     const unavailable = s.missing.length > 0;
-    const hasClauses = clausesOf(s).length > 0 && !unavailable;
+    const hasClauses = U.answerableClauses(s).length > 0 && !unavailable;
 
     const accepted = acc ? `
       <section class="callout callout-success" id="accept-result" tabindex="-1" role="status" aria-labelledby="accepted-h">
@@ -1500,7 +1512,7 @@
     const review = currentReview(a);
     if (!review) { updateAcceptState(a); return; }
     const s = a.snapshot;
-    const clauses = clausesOf(s);
+    const clauses = U.answerableClauses(s);
     openModal({
       title: 'Setujui perjanjian?',
       body: `

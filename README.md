@@ -52,7 +52,7 @@ to the next group, `Enter` on a radio submits nothing), the consent checkbox,
 the confirmation dialog (`Enter` opens, `Esc` cancels), and a 375 px mobile
 viewport (no horizontal overflow, answer targets at least 44 px tall). No
 screen reader was used.
-Administrator-defined clause options were checked the same way in headless
+The earlier format-4 clause editor (2–5 options, since replaced) was checked the same way in headless
 Chromium 131 (script not in the repository): typing a label, `Tab` from a
 label to “Memenuhi persyaratan”, `Space` toggling it, `Enter` in a label not
 submitting the form, `Enter`/`Space` on ↑/↓ reordering with focus following
@@ -63,6 +63,20 @@ choice, the dialog (`Enter` opens, `Esc` cancels, `Enter` confirms); at 375 px
 no horizontal overflow, option rows and long labels wrap, answer targets
 44 px, editor option controls 36 px; at 1280 px no overflow. jsdom (the
 `test:ui` suite) has no layout and no native radio arrow-key handling.
+The 0–2 option rules (format 5) were checked the same way in headless
+Chromium 131 (CDP script, not in the repository): editor — `ArrowUp`/`ArrowDown`
+move the single “Pilihan yang memenuhi syarat” choice, `Enter` on “+ Tambah
+pilihan” adds an option and focuses its label, `Enter` in a label submits
+nothing, `Tab` skips disabled ↑/↓, `Space` on “Hapus” removes the last option
+and focus moves to “+ Tambah pilihan”; user page — the information block has
+no controls, nothing is pre-selected (also not the single option), `Space`
+selects, `Tab` moves to the next group, arrow keys move within a group, the
+non-qualifying explanation appears in the clause, `Space` on the consent
+checkbox, `Enter` opens the dialog, `Esc` cancels, a changed answer while the
+dialog is open refuses the confirmation, `Enter` confirms (two answers, none for
+the information clause). At 375 px: no horizontal overflow in the editor or on
+the user page, answer targets ≥ 44 px, editor qualification choices 36 px; at
+1280 px no overflow. No console errors. No screen reader was used.
 
 ## Dependencies
 
@@ -161,63 +175,76 @@ notice under the user header says so on every user page.
 
 ### Consent clauses (“Klausul persetujuan”)
 
-- A snapshot whose document contains clauses shows each clause inline, at its
-  position, as a `<fieldset>` with the title as `<legend>`, the explanatory
-  text, a requirement note, and one radio per administrator-defined option
-  (in the configured order, explicit `<label for>`, `value` = option ID).
-  Each clause has its own radio group (`name="clause-<clauseId>"`); the user
-  selects exactly one option and nothing is selected initially.
-- Requirement text: a required clause says “Wajib dijawab” and names the
-  options that allow acceptance (e.g. “Setuju penuh” atau “Setuju dengan
-  catatan”); an optional clause says it may be left unanswered. No meaning is
-  inferred from labels: an option labelled “Ya” only allows acceptance if the
-  admin marked it “Memenuhi persyaratan”.
+Each clause has a system-generated ID, an editable title, explanatory rich
+text, and 0–2 administrator-defined answer options. There is no
+optional/required setting; behaviour follows the option count:
+
+| Options | Behaviour |
+|---|---|
+| 0 | Information only. Rendered as an ordinary block (no controls, no requirement note); no answer, never blocks acceptance, no acknowledgement or scrolling needed. |
+| 1 | The only option qualifies automatically, but the user must select it explicitly (nothing is pre-selected). |
+| 2 | Exactly one option (chosen by the admin) qualifies; the user must select it. |
+
+- A clause with options renders inline as a `<fieldset>` with the title as
+  `<legend>`, the explanatory text, a requirement note naming the qualifying
+  option, and one radio per option (configured order, explicit `<label for>`,
+  `value` = option ID, `name="clause-<clauseId>"`). Nothing is selected
+  initially. No meaning is inferred from labels or order.
 - “Setujui Perjanjian” is enabled only when the document is available, every
-  required clause has a qualifying option selected, and the consent checkbox
-  is checked. Below the button, each blocking clause is named (“belum
-  dijawab” or “jawaban saat ini “…” tidak memenuhi persyaratan”, plus the
-  options to choose) with a link that focuses it. A non-qualifying choice is
-  also explained in text inside the clause (not only by colour). Optional
-  clauses never block; any answer, or none, is allowed.
+  clause with options has its qualifying option selected, and the consent
+  checkbox is checked. Below the button, each blocking clause is named
+  (“belum dijawab” or “jawaban saat ini “…” tidak memenuhi persyaratan”, plus
+  the option to choose) with a link that focuses it. A non-qualifying choice
+  is also explained in text inside the clause (not only by colour).
 - Choosing an option only changes local page state: it never submits,
   records, or rejects anything, and does not remove access. Answers can be
   changed until the final confirmation. Leaving the document discards them.
-- The confirmation dialog lists the answers (by label) to be recorded. The
-  document availability, required answers, and the consent checkbox are
+- The confirmation dialog lists the answers (by label) to be recorded.
+  Document availability, the clause answers, and the consent checkbox are
   checked again when it opens and when it is confirmed; if the answers
   changed in between (or the page now shows another document), nothing is
   recorded and a new confirmation is required.
-- The acceptance record holds `answers`, keyed by clause ID: the selected
-  option ID, or `null` for an unanswered optional clause. Labels are never
-  identifiers. The record is bound to its user and snapshot. Afterwards the
-  page lists the recorded answers next to the original timestamp, using the
-  labels frozen in that snapshot, and the clauses show them read-only
-  (disabled). A repeated confirmation returns the original record, answers,
-  and timestamp.
-- Snapshots freeze `clauses` (ID, title, required flag, and `options`: ID,
-  label, `qualifies`, in order) together with the full JSON content. Later
-  renames, reorders, qualification changes, or publications never change
-  them. Documents without clauses, legacy snapshots, and earlier acceptances
-  are unchanged: no `answers` are invented and nothing has to be accepted
-  again.
-- **Fixed “Tidak / Ya” clauses (format version 3)** created before options
-  were configurable keep their original behaviour wherever they already
-  exist: published versions, snapshots, and acceptances still use the fixed
-  options (`"tidak"` / `"ya"`; a required clause needs “Ya”) and render as
-  before. They are never converted automatically. Opening the editor on such
-  a template offers “Buat draf dengan pilihan yang dapat diatur”, which
-  creates a new editable draft (or replaces the content of an existing draft,
-  bumping its revision): each clause keeps its ID, text, and required setting
-  and gets the options “Tidak” and “Ya” with new option IDs, only “Ya”
-  marked “Memenuhi persyaratan”. Nothing is republished, reassigned, or
-  requires reacceptance. New content can no longer be saved or published with
-  fixed clauses.
+- The acceptance record holds `answers`, keyed by clause ID, with the selected
+  option ID, only for clauses with options. Information-only clauses have no
+  entry (a document with only information clauses records no `answers`).
+  Labels are never identifiers. The record is bound to its user and snapshot
+  and frozen. Afterwards the page lists the recorded answers next to the
+  original timestamp, using the labels frozen in that snapshot, and the
+  clauses show them read-only (disabled). A repeated confirmation returns the
+  original record, answers, and timestamp.
+- Snapshots freeze `clauses` (ID, title, `options`: ID and label in order,
+  and `qualifyingOptionId`) together with the full JSON content. Later
+  renames, reorders, option-count or qualification changes, and publications
+  never change them.
+- **Historical clauses** keep their original behaviour wherever they already
+  exist (published versions, snapshots, acceptances); nothing is rewritten,
+  republished, reassigned, or has to be accepted again:
+  - *Format 4* (2–5 options, “Wajib dijawab” setting, several options could
+    be “Memenuhi persyaratan”; optional clauses record `null` when
+    unanswered) render and validate as before. A draft that still holds such
+    clauses cannot be saved or published unchanged. Opening it in the editor
+    maps each clause to the current shape for this explicit edit — every
+    option is kept (ID, label, order, even beyond two) and the qualifying
+    option is carried over only when unambiguous (a required clause with
+    exactly one qualifying option), otherwise none is set. A notice (“Klausul
+    memakai aturan lama”) and inline messages ask the admin to correct the
+    clauses (remove options down to two, choose the qualifying option, or
+    remove all options to make it information only). Nothing is removed
+    automatically; the mapped content counts as an unsaved change. The
+    publish dialog explains why such a draft cannot be published.
+  - *Format 3* (fixed “Tidak / Ya”; a required clause needs “Ya”) is never
+    opened directly. “Buat draf dengan pilihan yang dapat diatur” creates a new
+    draft (or replaces the content of an existing draft, bumping its revision)
+    in which each clause gets the options “Tidak” and “Ya” with new option IDs,
+    only “Ya” qualifying (format 4). That draft then goes through the format-4
+    correction above: a required clause keeps “Ya” as its qualifying option;
+    for a previously optional clause the admin decides.
 - Try it: in the admin console publish “Contoh Profil Perusahaan (fiktif)”,
   then in *Kontrol simulasi* assign it. Its fictional sample clauses are
-  “Pernyataan telah membaca profil perusahaan” (required; “Sudah membaca”
-  qualifies, “Belum membaca” does not), “Pemahaman ketentuan layanan”
-  (required; three options, two qualifying), and “Kesediaan menerima
-  informasi lanjutan” (optional; “Bersedia” / “Tidak bersedia”).
+  “Informasi pengolahan data” (0 options, information only), “Pernyataan telah
+  membaca profil perusahaan” (1 option: “Saya sudah membaca profil
+  perusahaan”), and “Pemahaman ketentuan layanan” (2 options: “Belum
+  memahami” / “Memahami dan menerima”; the second qualifies).
 
 ### Seed data
 
@@ -267,7 +294,7 @@ only contains the supported nodes, so it cannot produce anything else.
 | Daftar | Daftar berpoin, bernomor | `Ctrl+Shift+8/7`; `Tab`/`Shift+Tab` nest |
 | Tabel | Sisipkan tabel (3×2 with header row), + / − baris, + / − kolom, Baris header, Hapus tabel | `Tab` moves between cells |
 | Tabel label–nilai | Tabel label–nilai (inserts the preset), Lebar kolom label 20% / 25% / 30% | `Tab` moves between cells |
-| Klausul persetujuan | Klausul persetujuan (inserts a clause), Wajib dijawab (toggle, on by default), Hapus klausul | `Enter` in the title moves to the text |
+| Klausul persetujuan | Klausul persetujuan (inserts an information-only clause), Duplikat, Hapus klausul | `Enter` in the title moves to the text |
 | Placeholder | Sisipkan placeholder (menu) | arrows, `Enter`, `Esc` |
 
 - The toolbar is one tab stop (WAI-ARIA toolbar, roving tabindex): arrow keys,
@@ -278,25 +305,32 @@ only contains the supported nodes, so it cannot produce anything else.
 - Headings and tables are not available inside lists or table cells.
 - **Klausul persetujuan** inserts a clause block at the top level: an editable
   plain-text title, explanatory text (paragraphs, lists, bold/italic/underline,
-  placeholders), the “Wajib dijawab” setting, and an options form below the
-  text (“Pilihan jawaban”). A new clause starts with two empty options.
-  - Each option has a system-generated ID (`op_` + 10 characters, not shown),
-    a plain-text label input (“Pilihan 1” …), and — for required clauses only
-    — a “Memenuhi persyaratan” checkbox. For optional clauses the checkbox is
-    hidden (stored values are kept and ignored).
-  - ↑ / ↓ reorder, “Hapus” removes, “+ Tambah pilihan” adds; 2–5 options
-    (buttons are disabled at the limits, focus follows the moved option).
-    Every change is one editor transaction (undo/redo works).
+  placeholders), and an options form below the text (“Pilihan jawaban”). A new
+  clause starts with no options (“Informasi saja”).
+  - Each option has a system-generated ID (`op_` + 10 characters, not shown)
+    and a plain-text label input (“Pilihan 1”, “Pilihan 2”).
+  - 0 options: the form shows “Informasi saja”. 1 option: “Pilihan ini
+    otomatis memenuhi syarat”, no qualification control. 2 options: a
+    single-choice radio group “Pilihan yang memenuhi syarat” (one radio per
+    option, labelled with its number and label); exactly one must be chosen.
+  - “+ Tambah pilihan” adds (disabled at two: “Maksimal 2 pilihan”), “Hapus”
+    removes (down to zero), ↑ / ↓ reorder; focus follows the moved option,
+    and after removing the last option it moves to “+ Tambah pilihan”. Every
+    change is one editor transaction (undo/redo works).
+  - Transitions: 0 → 1, the new option qualifies; 1 → 2, the existing
+    qualifying option is kept and can be changed; 2 → 1, the remaining option
+    qualifies (whichever was removed); 1 → 0, no qualifying option. Two
+    options without a choice (e.g. pasted) are flagged and block saving.
   - Labels are validated inline and in the content issues: required, unique
     after trimming and case-insensitively, at most 80 characters, no `<` / `>`
     (HTML), no `{{ }}` (placeholders), no line breaks. Surrounding spaces are
-    trimmed when leaving the field. A required clause needs at least one
-    qualifying option; several may qualify. `Enter` in a label does nothing
-    (it never submits the form).
-  - Renaming or reordering keeps clause and option IDs. A pasted copy of a
-    clause that already exists in the document gets a fresh clause ID and
-    fresh option IDs (labels, order, and settings are kept); missing,
-    invalid, or duplicate pasted IDs are replaced.
+    trimmed when leaving the field. `Enter` in a label does nothing (it never
+    submits the form).
+  - Renaming or reordering keeps clause and option IDs. “Duplikat” (or a
+    pasted copy of a clause that already exists in the document) creates a
+    copy with a fresh clause ID and fresh option IDs; labels, order, and the
+    qualifying option (mapped to its new ID) are kept. Missing, invalid, or
+    duplicate pasted IDs are replaced.
   - Clauses cannot be placed in clauses, lists, or table cells. In the
     preview and in draft/version views, clauses are labelled “Simulasi
     pratinjau”; their radios use separate IDs and record nothing.
@@ -359,7 +393,7 @@ aligned and vertically centred text, about 18×22 px cell padding on desktop and
 minimum of about 7–8 rem so labels stay legible, and the table always fits the
 document width, so it never needs a horizontal scroll region.
 
-## Document format (`richtext-json`, versions 1, 2, and 3)
+## Document format (`richtext-json`, versions 1–5)
 
 New drafts and new published versions store content as a versioned JSON
 envelope; this JSON is the authoritative content (HTML is only derived output):
@@ -390,7 +424,7 @@ Allowed structure (`js/richtext.js`; anything else is rejected, never dropped):
 
 | Node | Children | Attributes |
 |---|---|---|
-| `doc` | ≥1 of `paragraph`, `heading`, `bulletList`, `orderedList`, `table` | — |
+| `doc` | ≥1 of `paragraph`, `heading`, `bulletList`, `orderedList`, `table`, `consentClause` | — |
 | `paragraph` | `text`, `variable` | `textAlign`: `null`/`left`/`center`/`right` |
 | `heading` | `text`, `variable` | `level`: 2 or 3 (required); `textAlign` |
 | `bulletList`, `orderedList` | ≥1 `listItem` | `orderedList.start`: integer ≥ 1 |
@@ -417,38 +451,50 @@ A consent clause is a top-level block. Its content is exactly one
 `clauseTitle` (plain text, no marks or placeholders, must not be blank)
 followed by one `clauseBody` (paragraphs and lists). Attributes:
 
-- `formatVersion` 4 (current): exactly `clauseId` (`/^cl_[a-z0-9]{10}$/`),
-  `required` (boolean), and `options`: 2–5 objects with exactly `id`
-  (`/^op_[a-z0-9]{10}$/`), `label` (plain-text string, rules above), and
-  `qualifies` (boolean). Clause IDs and option IDs are unique within the
-  document. A required clause needs at least one option with
-  `qualifies: true`. Every clause of a version-4 document has options.
+- `formatVersion` 5 (current): exactly `clauseId` (`/^cl_[a-z0-9]{10}$/`),
+  `options`, and `qualifyingOptionId`; no `required`. `options`: 0–2 objects
+  with exactly `id` (`/^op_[a-z0-9]{10}$/`) and `label` (plain-text string,
+  rules above). `qualifyingOptionId`: `null` with no options, the option's
+  ID with one option, the ID of exactly one of the two options with two.
+  Clause IDs and option IDs are unique within the document. Per-option
+  `qualifies` flags, more than two options, invalid references, and
+  duplicate IDs are reported with the clause title; nothing is dropped.
+- `formatVersion` 4 (historical, read-only): `clauseId`, `required`
+  (boolean), and `options`: 2–5 objects `{ id, label, qualifies }`; a
+  required clause needs at least one qualifying option. Valid for existing
+  versions and snapshots; refused when saving or publishing (see
+  “Historical clauses”).
 - `formatVersion` 3 (historical, read-only): `clauseId` and `required` only;
   the options are fixed (`tidak` / `ya`, `RT.CLAUSE_ANSWERS`; a required
-  clause needs `ya`). Such content stays valid for existing versions and
-  snapshots but is refused when saving or publishing a draft.
+  clause needs `ya`).
 
 ```json
 { "type": "consentClause",
-  "attrs": { "clauseId": "cl_bacaprofil", "required": true, "options": [
-    { "id": "op_sudahbaca1", "label": "Sudah membaca", "qualifies": true },
-    { "id": "op_belumbaca1", "label": "Belum membaca", "qualifies": false } ] },
+  "attrs": { "clauseId": "cl_risikolyn1",
+    "options": [
+      { "id": "op_belumpaham", "label": "Belum memahami" },
+      { "id": "op_terima0001", "label": "Memahami dan menerima" } ],
+    "qualifyingOptionId": "op_terima0001" },
   "content": [
-    { "type": "clauseTitle", "content": [{ "type": "text", "text": "Pernyataan telah membaca profil perusahaan" }] },
-    { "type": "clauseBody", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Nyatakan apakah …" }] }] }
+    { "type": "clauseTitle", "content": [{ "type": "text", "text": "Pemahaman ketentuan layanan" }] },
+    { "type": "clauseBody", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Hanya …" }] }] }
   ] }
 ```
 
-**Versions.** `formatVersion` 1, 2, 3, and 4 are accepted. Version 2 adds the
+An information-only clause has `"options": []` and `"qualifyingOptionId": null`.
+
+**Versions.** `formatVersion` 1–5 are accepted. Version 2 adds the
 table preset; version 3 adds consent clauses with fixed options; version 4
-adds administrator-defined options. When content is stored, the
+adds administrator-defined options; version 5 replaces them with 0–2 options
+and a single `qualifyingOptionId`. When content is stored, the
 envelope gets the lowest version that can express it, so documents without
 these blocks keep their earlier version. Nothing is upgraded or restyled
 automatically.
 
-**Layout version.** `RT.RENDER_VERSION` (currently 4; 3 adds the clause
-fieldset, 4 adds configurable options and their requirement note; older
-blocks, including fixed-option clauses, render as before) names the HTML/CSS layout
+**Layout version.** `RT.RENDER_VERSION` (currently 5; 3 adds the clause
+fieldset, 4 adds configurable options and their requirement note, 5 adds the
+information-only clause block; older blocks, including format-3/4 clauses,
+render as before) names the HTML/CSS layout
 rules. It is recorded as `renderVersion` on each newly published rich-text
 version and each new rich-text user snapshot. Records created earlier carry no
 `renderVersion` and are left unchanged; the preset's styles only target the new
@@ -517,17 +563,18 @@ only.
 | `tpl_3` Persetujuan Komunikasi Pemasaran | — | JSON, revision 2 (shows centre alignment, italic, underline) |
 | `tpl_4` Pemberitahuan Perubahan Layanan | v1–v3 Markdown | — (Edit → conversion offer) |
 | `tpl_5` Ketentuan Dompet (archived) | v1 Markdown | Markdown (read-only; archived) |
-| `tpl_6` Contoh Profil Perusahaan (fiktif) | — | JSON v4, revision 1: sample for the label–value preset and consent clauses with custom options |
+| `tpl_6` Contoh Profil Perusahaan (fiktif) | — | JSON v5, revision 1: sample for the label–value preset and consent clauses with 0, 1, and 2 options |
 
 `tpl_6` is an explicitly labelled, editable sample: headings “Profil
 Perusahaan” (8 rows, including a long three-paragraph history and a long URL)
 and “Susunan Pengurus Perusahaan” (3 rows). All company details and names are
 fictional static text (`.example` domains, “Contoh” names); it uses no
 placeholders and no personal-data lookups. Catalogue placeholders can still be
-inserted into its cells. After the tables it holds three consent clauses with custom
-labels (see [Consent clauses](#consent-clauses-klausul-persetujuan)). No seed
-record uses fixed “Tidak / Ya” clauses; `tests/ui-clause.js` injects one to
-check historical behaviour and the explicit conversion.
+inserted into its cells. After the tables it holds three consent clauses with
+zero, one, and two options (see [Consent clauses](#consent-clauses-klausul-persetujuan)).
+No seed record uses historical clauses; `tests/ui-clause.js` injects a
+format-4 draft and a format-3 version to check legacy editing, historical
+behaviour, and the explicit conversion.
 
 ## Files
 
@@ -542,6 +589,7 @@ check historical behaviour and the explicit conversion.
 - `tests/dom-harness.js` — shared jsdom setup for the UI tests
 - `tests/richtext.test.js`, `tests/ui-editor.js` — JSON format and visual editor tests
 - `tests/labelvalue.test.js`, `tests/ui-labelvalue.js` — label–value table preset tests
+- `tests/clause.test.js`, `tests/ui-clause.js` — consent clause rules, legacy clauses, acceptance answers
 
 ## Out of scope
 
