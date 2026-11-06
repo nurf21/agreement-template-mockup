@@ -2,24 +2,30 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const S = require('../js/store.js');
+const RT = require('../js/richtext.js');
 
 const T0 = '2026-11-05T01:00:00Z';
 const fresh = () => ({ nextId: 1, templates: [] });
 
+/** One-paragraph rich-text document; '' gives an empty paragraph. */
+const doc = (text) => RT.wrap({ type: 'doc', content: [text ? { type: 'paragraph', content: [{ type: 'text', text }] } : { type: 'paragraph' }] });
+const json = (fields) => (typeof fields.content === 'string' ? { ...fields, content: doc(fields.content) } : fields);
+const textOf = (record) => RT.plainText(record.content);
+
 function create(state, extra) {
-  return S.saveDraft(state, {
+  return S.saveDraft(state, json({
     templateId: null, code: S.generateCode(state), internalName: 'Nama',
     title: 'Judul', content: 'Isi', ...extra,
-  }, 'A', T0);
+  }), 'A', T0);
 }
 
 /** Save as an admin who reviewed `lock` (defaults to the current lockVersion). */
 function save(state, t, fields, lock) {
-  return S.saveDraft(state, {
+  return S.saveDraft(state, json({
     templateId: t.id, code: t.code, internalName: t.internalName,
     title: t.draft ? t.draft.title : 'Judul', content: 'Isi', ...fields,
     lockVersion: lock === undefined ? t.lockVersion : lock,
-  }, 'A', T0);
+  }), 'A', T0);
 }
 
 const publish = (state, t, lock) => S.publishDraft(state, t.id, lock === undefined ? t.lockVersion : lock, 'A', T0);
@@ -61,6 +67,8 @@ test('publishing freezes a version and closes the draft', () => {
   assert.equal(t.draft, null);
   assert.ok(Object.isFrozen(v));
   assert.throws(() => { 'use strict'; v.content = 'x'; }, TypeError);
+  assert.throws(() => { 'use strict'; v.content.document.content[0].content[0].text = 'x'; }, TypeError, 'JSON content deep-frozen');
+  assert.equal(v.format, 'richtext-json');
   assert.equal(S.statusOf(t), 'published');
 });
 
@@ -68,7 +76,7 @@ test('publishing does not assign the agreement to anyone', () => {
   const st = fresh();
   const t = create(st);
   const v = publish(st, t);
-  assert.deepEqual(Object.keys(v).sort(), ['content', 'fromRevision', 'number', 'publishedAt', 'publishedBy', 'title']);
+  assert.deepEqual(Object.keys(v).sort(), ['content', 'format', 'fromRevision', 'number', 'publishedAt', 'publishedBy', 'title']);
   assert.deepEqual(Object.keys(st).sort(), ['nextId', 'templates']);
 });
 
@@ -80,7 +88,7 @@ test('editing a published template copies it into one draft; replacement keeps h
   assert.equal(t.draft.basedOnVersion, 1);
   assert.equal(t.draft.revision, 1);
   publish(st, t);
-  assert.deepEqual(t.versions.map((v) => [v.number, v.content]), [[1, 'Versi satu'], [2, 'Versi dua']]);
+  assert.deepEqual(t.versions.map((v) => [v.number, textOf(v)]), [[1, 'Versi satu'], [2, 'Versi dua']]);
 });
 
 test('at most one draft: a second editor starting from the published version conflicts', () => {
@@ -91,7 +99,7 @@ test('at most one draft: a second editor starting from the published version con
   save(st, t, {}); // first editor creates the draft
   const before = snapshot(t);
   assert.throws(
-    () => S.saveDraft(st, { templateId: t.id, internalName: 'Nama', title: 'J', content: 'x', lockVersion: reviewed }, 'B', T0),
+    () => S.saveDraft(st, { templateId: t.id, internalName: 'Nama', title: 'J', content: doc('x'), lockVersion: reviewed }, 'B', T0),
     (e) => e.code === 'CONFLICT'
   );
   assert.equal(snapshot(t), before);
@@ -132,7 +140,7 @@ test('a stale publication request cannot publish a replacement draft with the sa
   assert.throws(() => publish(st, t, reviewed), (e) => e.code === 'CONFLICT');
   assert.equal(snapshot(t), before);
   assert.equal(t.versions.length, 1);
-  assert.equal(t.draft.content, 'Draf pengganti');
+  assert.equal(textOf(t.draft), 'Draf pengganti');
 });
 
 test('a concurrent save invalidates an open publication confirmation', () => {
@@ -204,14 +212,28 @@ test('generated codes are unique', () => {
   assert.notEqual(S.generateCode(st, () => seq[i++]), 'TPL-AAAAAA');
 });
 
-test('seed templates carry a lockVersion and valid content', () => {
-  const MD = require('../js/markdown.js');
+test('seed templates carry a lockVersion and valid content in their own format', () => {
   for (const t of S.createSeedState().templates) {
     assert.ok(Number.isInteger(t.lockVersion), t.code);
-    for (const doc of [t.draft, ...t.versions].filter(Boolean)) {
-      assert.deepEqual(MD.validateDraft({ internalName: t.internalName, title: doc.title, content: doc.content }), [], t.code);
+    for (const rec of [t.draft, ...t.versions].filter(Boolean)) {
+      assert.deepEqual(S.validateRecord(t.internalName, rec), [], t.code);
     }
   }
+});
+
+test('seed: published versions stay legacy Markdown without a format field; editable drafts are JSON', () => {
+  const st = S.createSeedState();
+  for (const t of st.templates) {
+    for (const v of t.versions) {
+      assert.equal(v.format, undefined, `${t.code} v${v.number}`);
+      assert.equal(typeof v.content, 'string');
+      assert.equal(S.formatOf(v), 'markdown');
+    }
+  }
+  assert.equal(S.getTemplate(st, 'tpl_1').draft.format, 'richtext-json');
+  assert.deepEqual(S.getTemplate(st, 'tpl_1').draft.convertedFrom, { format: 'markdown', version: 2 });
+  assert.equal(S.getTemplate(st, 'tpl_3').draft.format, 'richtext-json');
+  assert.equal(S.formatOf(S.getTemplate(st, 'tpl_5').draft), 'markdown', 'archived legacy draft untouched');
 });
 
 for (const field of ['internalName', 'title', 'content']) {
@@ -238,13 +260,91 @@ test('publishing re-checks the required fields', () => {
   assert.equal(t.versions.length, 0);
 });
 
+const cell = (type, text) => ({ type, content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
+const raggedTable = RT.wrap({ type: 'doc', content: [{ type: 'table', content: [
+  { type: 'tableRow', content: [cell('tableHeader', 'A'), cell('tableHeader', 'B')] },
+  { type: 'tableRow', content: [cell('tableCell', '1'), cell('tableCell', '2'), cell('tableCell', '3')] },
+] }] });
+
 test('saving and publishing refuse inconsistent tables', () => {
   const st = fresh();
-  const bad = '| A | B |\n|---|---|\n| 1 | 2 | 3 |';
-  assert.throws(() => create(st, { content: bad }),
-    (e) => e.code === 'INVALID' && e.details.errors.some((er) => er.kind === 'table' && er.line === 3));
+  assert.throws(() => create(st, { content: raggedTable }),
+    (e) => e.code === 'INVALID' && e.details.errors.some((er) => /jumlah sel yang sama/.test(er.message)));
   const t = create(st);
-  t.draft.content = bad;
-  assert.throws(() => publish(st, t), (e) => e.code === 'INVALID' && e.details.errors[0].line === 3);
+  t.draft.content = raggedTable; // corrupt stored data directly; publish must still refuse it
+  assert.throws(() => publish(st, t), (e) => e.code === 'INVALID' && /Blok 1/.test(e.details.errors[0].message));
   assert.equal(t.versions.length, 0);
+});
+
+test('new drafts must be rich-text JSON; Markdown strings and unsupported structures are refused', () => {
+  const st = fresh();
+  assert.throws(() => S.saveDraft(st, { templateId: null, code: S.generateCode(st), internalName: 'N', title: 'J', content: '## Markdown' }, 'A', T0),
+    (e) => e.code === 'INVALID' && e.details.errors.some((er) => /richtext-json/.test(er.message)));
+  const img = RT.wrap({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'x' }] }, { type: 'image', attrs: { src: 'x' } }] });
+  assert.throws(() => create(st, { content: img }), (e) => e.code === 'INVALID' && /tidak didukung/.test(e.details.errors[0].message));
+  assert.equal(st.templates.length, 0);
+});
+
+test('saved draft content is a detached frozen copy', () => {
+  const st = fresh();
+  const input = doc('Asli');
+  const t = create(st, { content: input });
+  input.document.content[0].content[0].text = 'diubah setelah simpan';
+  assert.equal(textOf(t.draft), 'Asli');
+  assert.ok(Object.isFrozen(t.draft.content.document));
+});
+
+test('a legacy Markdown draft cannot be published until converted', () => {
+  const st = S.createSeedState();
+  const t = S.getTemplate(st, 'tpl_5');
+  t.archived = null; // only to reach the format check on an unarchived copy
+  assert.throws(() => publish(st, t), (e) => e.code === 'LEGACY_FORMAT');
+  assert.equal(t.versions.length, 1);
+});
+
+test('explicit conversion creates a JSON draft from the latest Markdown version and leaves it unchanged', () => {
+  const st = S.createSeedState();
+  const t = S.getTemplate(st, 'tpl_4'); // published Markdown v1-v3, no draft
+  const v3 = t.versions[2];
+  const before = JSON.stringify(t.versions);
+  const lock = t.lockVersion;
+  S.convertLegacyDraft(st, t.id, lock, 'A', T0);
+  assert.equal(JSON.stringify(t.versions), before, 'published versions unchanged');
+  assert.equal(v3.format, undefined);
+  assert.equal(t.lockVersion, lock + 1);
+  assert.equal(t.draft.format, 'richtext-json');
+  assert.equal(t.draft.revision, 1);
+  assert.equal(t.draft.basedOnVersion, 3);
+  assert.deepEqual(t.draft.convertedFrom, { format: 'markdown', version: 3 });
+  assert.equal(t.draft.title, v3.title);
+  assert.deepEqual(RT.placeholderKeys(t.draft.content), ['nama_lengkap']);
+  assert.ok(RT.plainText(t.draft.content).includes('Akan diumumkan | Penyesuaian tampilan'));
+  // Converting needs the current lockVersion and only applies to Markdown sources.
+  assert.throws(() => S.convertLegacyDraft(st, t.id, lock, 'A', T0), (e) => e.code === 'CONFLICT');
+  assert.throws(() => S.convertLegacyDraft(st, t.id, t.lockVersion, 'A', T0), (e) => e.code === 'NOT_LEGACY');
+  // The converted draft publishes as a JSON version.
+  const v4 = publish(st, t);
+  assert.equal(v4.format, 'richtext-json');
+  assert.equal(v4.number, 4);
+});
+
+test('conversion that cannot preserve content saves nothing', () => {
+  const st = S.createSeedState();
+  const t = S.getTemplate(st, 'tpl_2');
+  t.versions = Object.freeze([Object.freeze({ ...t.versions[0], content: '# A\n\n## B\n\n### C\n\nTeks.' })]);
+  const before = JSON.stringify(t);
+  assert.throws(() => S.convertLegacyDraft(st, t.id, t.lockVersion, 'A', T0),
+    (e) => e.code === 'CONVERSION_FAILED' && /tiga tingkat judul/.test(e.details.errors[0]));
+  assert.equal(JSON.stringify(t), before, 'no draft, no lockVersion change');
+});
+
+test('simulated external edit produces a JSON draft and bumps lockVersion', () => {
+  const st = S.createSeedState();
+  const t = S.getTemplate(st, 'tpl_2');
+  const lock = t.lockVersion;
+  S.simulateExternalEdit(st, t.id, 'Lain', T0);
+  assert.equal(t.draft.format, 'richtext-json');
+  assert.match(RT.plainText(t.draft.content), /admin lain \(simulasi\)\.$/);
+  assert.equal(t.lockVersion, lock + 1);
+  assert.equal(S.formatOf(t.versions[0]), 'markdown', 'published version untouched');
 });

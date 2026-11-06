@@ -1,7 +1,8 @@
 // DOM smoke test: drives the mockup through its main flows in jsdom.
 const { load } = require('./dom-harness');
 
-const { w, $, errors, text, tick, go, click, type, confirmDialog, check } = load();
+const h = load();
+const { w, $, errors, text, tick, go, click, type, confirmDialog, check, setDoc, typeText, para, docText } = h;
 
 (async () => {
 check($('.data-table tbody').children.length === 5, 'list shows 5 seed templates');
@@ -28,18 +29,20 @@ check(['#f-name', '#f-title', '#f-content'].every((s) => $(s).getAttribute('aria
 check(w.location.hash === '#/baru', 'nothing saved');
 type('#f-name', 'Uji Baru');
 type('#f-title', '   ');
-type('#f-content', ' \n ');
+setDoc(para('  '), para(), { type: 'table', content: [{ type: 'tableRow', content: [{ type: 'tableHeader', content: [para()] }] }] });
 click($('#btn-save'));
-check($('#err-title').textContent.includes('wajib') && $('#err-content').textContent.includes('wajib') && !$('#err-internalName').textContent, 'whitespace-only title/content rejected');
-type('#f-content', 'Halo <b>x</b> {{email}}');
-check($('#err-content').textContent.includes('HTML mentah'), 'live content issues');
-type('#f-content', '| A | B |\n|---|---|\n| 1 | 2 | sel-ekstra |');
-check($('#err-content').textContent.includes('Baris 3: Baris tabel memiliki 3 kolom'), 'inconsistent table reported with line');
-check(!$('#preview-doc table') && $('#preview-doc .md-invalid') && $('#preview-doc').textContent.includes('sel-ekstra'), 'malformed table previewed as literal text, no text lost');
+check($('#err-title').textContent.includes('wajib') && $('#err-content').textContent.includes('wajib') && !$('#err-internalName').textContent, 'whitespace-only title and whitespace/empty-structure content rejected');
+setDoc(para('Halo {{email}}'));
+check($('#err-content').textContent.includes('kurung kurawal ganda'), 'live content issues: typed {{…}} text is not a placeholder');
+check($('#f-content').getAttribute('aria-invalid') === 'true', 'editor marked aria-invalid');
 click($('#btn-save'));
-check(w.location.hash === '#/baru' && $('#error-summary').textContent.includes('Baris 3'), 'save refused for inconsistent table');
+check(w.location.hash === '#/baru' && $('#error-summary').textContent.includes('kurung kurawal'), 'save refused for invalid content');
 type('#f-title', 'Judul Uji');
-type('#f-content', '## A\n\nHalo {{nama_lengkap}}');
+setDoc({ type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text: 'A' }] }, para('Halo '));
+h.editor().commands.focus('end');
+click($('#ph-btn'));
+click($('[data-action="ph-insert"][data-key="nama_lengkap"]'));
+check($('#f-content .ph-chip') && $('#f-content .ph-chip').textContent === 'Nama lengkap', 'placeholder inserted as a labelled chip');
 check($('#preview-doc').textContent.includes('Dewi Lestari (contoh)'), 'preview substitutes sample value');
 check($('#preview-doc').textContent.includes('Contoh — bukan dokumen pengguna'), 'preview label');
 click($('#btn-save')); await tick();
@@ -55,7 +58,7 @@ check(/#\/t\/tpl_\d+$/.test(w.location.hash) && text().includes('Versi 1'), 'pub
 // A concurrent save invalidates an open publication confirmation.
 const id0 = w.location.hash.split('/')[2];
 await go(`#/t/${id0}/edit`);
-type('#f-content', '## A\n\nRevisi kedua.');
+setDoc(para('Revisi kedua.'));
 click($('#btn-save'));
 click($('#btn-publish'));
 check($('#dialog').open, 'confirmation open');
@@ -70,11 +73,12 @@ const id = w.location.hash.split('/')[2];
 await go(`#/t/${id}/edit`);
 check($('#draft-status').textContent.includes('disalin dari Versi 1'), 'new draft copied from published');
 click($('[data-action="sim-conflict"]'));
-type('#f-content', 'ubah');
+typeText('ubah');
 click($('#btn-save'));
 check(text().includes('Draf telah diubah oleh admin lain'), 'conflict banner');
 click($('[data-action="reload-draft"]'));
-check($('#f-content').value.includes('admin lain (simulasi)') && text().includes('Draf terbaru telah dimuat'), 'reload loads latest draft');
+check(docText().includes('admin lain (simulasi)') && text().includes('Draf terbaru telah dimuat'), 'reload loads latest draft');
+check($('#recovered').value.includes('ubah'), 'unsaved text kept for copying');
 
 // Permissions.
 const perm = (p, v) => { const b = $(`[data-perm="${p}"]`); b.checked = v; b.dispatchEvent(new w.Event('change')); };

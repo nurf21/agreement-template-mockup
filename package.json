@@ -4,10 +4,22 @@
   "private": true,
   "description": "Interactive admin mockup for personalized agreement templates (local mock data only).",
   "scripts": {
+    "build": "esbuild src/editor.js --bundle --format=iife --global-name=AgreementEditor --minify --sourcemap --target=es2020 --outfile=dist/editor.js",
+    "start": "esbuild src/editor.js --bundle --format=iife --global-name=AgreementEditor --sourcemap --target=es2020 --outfile=dist/editor.js --servedir=. --serve=8000",
     "test": "node --test tests/*.test.js",
-    "test:ui": "node tests/ui-smoke.js && node tests/ui-user.js"
+    "pretest:ui": "npm run build",
+    "test:ui": "node tests/ui-smoke.js && node tests/ui-user.js && node tests/ui-editor.js"
   },
   "devDependencies": {
+    "esbuild": "^0.28.2",
     "jsdom": "^25.0.1"
+  },
+  "dependencies": {
+    "@tiptap/core": "^3.33.0",
+    "@tiptap/extension-list": "^3.33.0",
+    "@tiptap/extension-table": "^3.33.0",
+    "@tiptap/extension-text-align": "^3.33.0",
+    "@tiptap/pm": "^3.33.0",
+    "@tiptap/starter-kit": "^3.33.0"
   }
 }

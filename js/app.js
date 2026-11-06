@@ -3,6 +3,8 @@
   'use strict';
 
   const MD = window.AgreementMarkdown;
+  const RT = window.AgreementRichText;
+  const EditorLib = window.AgreementEditor || null;
   const S = window.AgreementStore;
   const U = window.AgreementUser;
   const esc = MD.escapeHtml;
@@ -79,8 +81,9 @@
   }
 
   function isDirty(e) {
-    return Boolean(e) && (
-      e.internalName !== e.orig.internalName || e.title !== e.orig.title || e.content !== e.orig.content
+    return Boolean(e) && !e.legacy && (
+      e.internalName !== e.orig.internalName || e.title !== e.orig.title ||
+      JSON.stringify(e.content) !== e.orig.content
     );
   }
 
@@ -95,7 +98,7 @@
       location.hash = app.currentHash;
       return;
     }
-    if (leaving) app.editor = null;
+    if (leaving) dropEditor();
     app.currentHash = location.hash;
     render({ nav: true });
   });
@@ -165,11 +168,27 @@
     return `<div class="segmented-buttons" role="group" aria-label="Tampilan placeholder">${seg('1', 'Nilai contoh')}${seg('0', 'Kode placeholder')}</div>`;
   }
 
-  /** The one document renderer used by preview, draft view, and version view. */
-  function documentHtml(title, content) {
-    const body = String(content).trim()
-      ? MD.renderMarkdown(content, app.showValues ? MD.SAMPLE_VALUES : null)
-      : '<p class="doc-empty">Belum ada isi dokumen.</p>';
+  const formatLabel = (rec) => (S.formatOf(rec) === RT.FORMAT
+    ? `Editor visual (JSON v${rec.content.formatVersion})` : 'Markdown lama');
+
+  /**
+   * Document renderer for preview, draft view, and version view. Rich-text
+   * records use the validated JSON renderer (also used for new user
+   * snapshots); legacy Markdown records keep their original renderer.
+   */
+  function documentHtml(title, rec) {
+    const values = app.showValues ? MD.SAMPLE_VALUES : null;
+    const empty = '<p class="doc-empty">Belum ada isi dokumen.</p>';
+    let body;
+    if (S.formatOf(rec) === RT.FORMAT) {
+      try {
+        body = RT.hasMeaningfulContent(rec.content) ? RT.renderDocument(rec.content, values) : empty;
+      } catch (_) {
+        body = '<div class="md-invalid" role="note"><p>Pratinjau tidak dapat ditampilkan karena struktur isi dokumen tidak valid. Lihat daftar masalah isi dokumen.</p></div>';
+      }
+    } else {
+      body = String(rec.content).trim() ? MD.renderMarkdown(rec.content, values) : empty;
+    }
     return `
       <article class="doc" aria-label="${esc(SAMPLE_LABEL)}">
         <p class="doc-sample-label">${esc(SAMPLE_LABEL)}</p>
@@ -319,9 +338,12 @@
       const editLabel = t.draft ? 'Lanjutkan edit draf'
         : (latest ? `Edit (buat draf dari Versi ${latest.number})` : 'Edit draf');
       actions.push(button(editLabel, { href: `#/t/${t.id}/edit`, primary: true, allowed: app.perms.edit, reason: 'Memerlukan izin Edit' }));
+      const legacyDraft = t.draft && S.formatOf(t.draft) !== RT.FORMAT;
       actions.push(button('Terbitkan draf…', {
-        action: 'publish', id: t.id, lock: t.lockVersion, allowed: app.perms.publish && Boolean(t.draft),
-        reason: !app.perms.publish ? 'Memerlukan izin Terbitkan/Arsipkan' : 'Tidak ada draf untuk diterbitkan',
+        action: 'publish', id: t.id, lock: t.lockVersion,
+        allowed: app.perms.publish && Boolean(t.draft) && !legacyDraft,
+        reason: !app.perms.publish ? 'Memerlukan izin Terbitkan/Arsipkan'
+          : (legacyDraft ? 'Draf Markdown lama harus dikonversi ke editor visual terlebih dahulu' : 'Tidak ada draf untuk diterbitkan'),
       }));
       actions.push(button('Arsipkan…', { action: 'archive', id: t.id, lock: t.lockVersion, allowed: app.perms.publish, danger: true, reason: 'Memerlukan izin Terbitkan/Arsipkan' }));
     }
@@ -344,12 +366,12 @@
     let meta;
     let doc;
     if (sel === 'published') {
-      meta = `<strong>Versi ${latest.number}</strong> · diterbitkan ${timeTag(latest.publishedAt)} oleh ${esc(latest.publishedBy)} · judul dan isi dibekukan`;
-      doc = documentHtml(latest.title, latest.content);
+      meta = `<strong>Versi ${latest.number}</strong> · diterbitkan ${timeTag(latest.publishedAt)} oleh ${esc(latest.publishedBy)} · judul dan isi dibekukan · format ${esc(formatLabel(latest))}`;
+      doc = documentHtml(latest.title, latest);
     } else {
       const d = t.draft;
-      meta = `<strong>Draf revisi ${d.revision}</strong> · ${d.basedOnVersion ? `disalin dari Versi ${d.basedOnVersion}` : 'belum pernah diterbitkan'} · diperbarui ${timeTag(d.updatedAt)} oleh ${esc(d.updatedBy)}`;
-      doc = documentHtml(d.title, d.content);
+      meta = `<strong>Draf revisi ${d.revision}</strong> · ${d.basedOnVersion ? `disalin dari Versi ${d.basedOnVersion}` : 'belum pernah diterbitkan'} · diperbarui ${timeTag(d.updatedAt)} oleh ${esc(d.updatedBy)} · format ${esc(formatLabel(d))}${d.convertedFrom ? ` · dikonversi dari Markdown ${d.convertedFrom.version ? `Versi ${d.convertedFrom.version}` : `draf revisi ${d.convertedFrom.draftRevision}`}` : ''}`;
+      doc = documentHtml(d.title, d);
     }
 
     return `
@@ -430,38 +452,57 @@
           ${next ? `<a class="btn" href="#/t/${t.id}/v/${next.number}">Versi ${next.number} →</a>` : ''}
         </div>
       </div>
-      <div class="callout callout-muted" role="note"><p>Versi terbit bersifat hanya baca. Judul dan isinya dibekukan saat diterbitkan.</p></div>
+      <div class="callout callout-muted" role="note"><p>Versi terbit bersifat hanya baca. Judul dan isinya dibekukan saat diterbitkan.
+        Format: ${esc(formatLabel(v))}.${S.formatOf(v) === 'markdown' ? ' Versi ini ditampilkan dengan renderer Markdown aslinya dan tidak dikonversi otomatis.' : ''}</p></div>
       <section class="doc-panel doc-panel-solo" aria-label="Dokumen Versi ${v.number}">
         <div class="doc-toolbar"><span></span>${valuesToggle()}</div>
-        ${documentHtml(v.title, v.content)}
+        ${documentHtml(v.title, v)}
       </section>`;
   }
 
   /* ---------- Editor ---------- */
 
+  const contentKey = (c) => JSON.stringify(c);
+  const origOf = (f) => ({ internalName: f.internalName, title: f.title, content: contentKey(f.content) });
+
   function newEditorSession(t) {
     const wide = window.matchMedia('(min-width: 1024px)').matches;
+    const common = {
+      attempted: false, conflict: null, recovered: null, savedAt: null, showPreview: wide,
+      rte: null, legacy: null, convertErrors: null,
+    };
     if (!t) {
-      const fields = { internalName: '', title: '', content: '' };
+      const fields = { internalName: '', title: '', content: RT.emptyContent() };
       return {
-        key: 'create', templateId: null, code: S.generateCode(app.data),
-        ...fields, orig: { ...fields }, baseRevision: null, basedOnVersion: null, lockVersion: null,
-        attempted: false, conflict: null, recovered: null, savedAt: null, showPreview: wide,
+        ...common, key: 'create', templateId: null, code: S.generateCode(app.data),
+        ...fields, orig: origOf(fields), baseRevision: null, basedOnVersion: null, lockVersion: null,
       };
     }
     const latest = S.latestVersion(t);
-    const src = t.draft || latest || { title: '', content: '' };
-    const fields = { internalName: t.internalName, title: src.title, content: src.content };
+    const src = t.draft || latest;
+    // Legacy Markdown is never opened in the visual editor; the admin converts it explicitly.
+    const legacy = src && S.formatOf(src) === 'markdown'
+      ? { draft: Boolean(t.draft), label: t.draft ? `Draf revisi ${t.draft.revision}` : `Versi ${latest.number}` }
+      : null;
+    const fields = {
+      internalName: t.internalName,
+      title: src ? src.title : '',
+      content: src && !legacy ? src.content : RT.emptyContent(),
+    };
     return {
-      key: 'edit:' + t.id, templateId: t.id, code: t.code,
-      ...fields, orig: { ...fields },
+      ...common, key: 'edit:' + t.id, templateId: t.id, code: t.code, legacy,
+      ...fields, orig: origOf(fields),
       // What this editor loaded. lockVersion guards every mutation; the draft
       // revision and source version are only shown to the admin.
       baseRevision: t.draft ? t.draft.revision : null,
       basedOnVersion: t.draft ? t.draft.basedOnVersion : (latest ? latest.number : null),
       lockVersion: t.lockVersion,
-      attempted: false, conflict: null, recovered: null, savedAt: null, showPreview: wide,
     };
+  }
+
+  function dropEditor() {
+    if (app.editor && app.editor.rte) app.editor.rte.destroy();
+    app.editor = null;
   }
 
   function renderEditor(route) {
@@ -479,20 +520,21 @@
           </section>`;
       }
     }
-    if (!app.editor || app.editor.key !== editorKey(route)) app.editor = newEditorSession(t);
+    if (!app.editor || app.editor.key !== editorKey(route)) {
+      dropEditor();
+      app.editor = newEditorSession(t);
+    }
     const e = app.editor;
+    if (e.legacy) return renderConvert(t, e);
     const isNew = !e.templateId;
     const trail = [{ label: 'Template', href: '#/' }];
     if (t) trail.push({ label: t.internalName, href: `#/t/${t.id}` });
     trail.push({ label: isNew ? 'Buat template' : 'Edit draf' });
 
-    const tool = (fmtKey, label, text) =>
-      `<button type="button" class="tool" data-action="fmt" data-fmt="${fmtKey}" aria-label="${label}" title="${label}">${text}</button>`;
     const phItems = MD.PLACEHOLDERS.map((p) => `
       <button type="button" role="menuitem" class="ph-item" data-action="ph-insert" data-key="${esc(p.key)}">
-        <code>{{${esc(p.key)}}}</code>
-        <span class="ph-item-label">${esc(p.label)}${p.provisional ? ' <span class="badge badge-warn">Sementara</span>' : ''}</span>
-        <span class="ph-item-desc">${esc(p.description)}</span>
+        <span class="ph-item-label"><span class="ph-chip">${esc(p.label)}</span>${p.provisional ? ' <span class="badge badge-warn">Sementara</span>' : ''}</span>
+        <span class="ph-item-desc">${esc(p.description)} Kunci sistem: <code>${esc(p.key)}</code></span>
       </button>`).join('');
 
     return `
@@ -524,43 +566,35 @@
         <div class="field">
           <label for="f-title">Judul dokumen <span class="req">wajib</span></label>
           <input id="f-title" type="text" autocomplete="off" aria-required="true" aria-describedby="hint-title err-title">
-          <p class="hint" id="hint-title">Teks biasa, tampil di atas dokumen. Dibekukan saat versi diterbitkan.</p>
+          <p class="hint" id="hint-title">Teks biasa, tampil di atas dokumen. Maksimal ${MD.LIMITS.title} karakter. Dibekukan saat versi diterbitkan.</p>
           <p class="field-error" id="err-title"></p>
         </div>
 
         <div class="editor-grid" id="editor-grid">
           <div class="editor-col">
             <div class="label-row">
-              <label for="f-content">Isi dokumen (Markdown) <span class="req">wajib</span></label>
+              <span class="field-label" id="content-label">Isi dokumen <span class="req">wajib</span></span>
               <span class="char-count" id="char-count"></span>
             </div>
-            <div class="md-toolbar" role="toolbar" aria-label="Format Markdown">
-              ${tool('h2', 'Judul bagian', 'H2')}${tool('h3', 'Subjudul', 'H3')}
-              <span class="tool-sep" aria-hidden="true"></span>
-              ${tool('bold', 'Tebal', '<strong>B</strong>')}${tool('italic', 'Miring', '<em>I</em>')}
-              <span class="tool-sep" aria-hidden="true"></span>
-              ${tool('ul', 'Daftar berpoin', '• Daftar')}${tool('ol', 'Daftar bernomor', '1. Daftar')}${tool('table', 'Tabel', 'Tabel')}
-              <span class="tool-sep" aria-hidden="true"></span>
-              <div class="ph-wrap">
-                <button type="button" class="tool tool-ph" id="ph-btn" data-action="ph-toggle" aria-haspopup="menu" aria-expanded="false" aria-controls="ph-menu">Sisipkan Placeholder ▾</button>
-                <div class="ph-menu" id="ph-menu" role="menu" aria-label="Katalog placeholder sistem" hidden>
-                  ${phItems}
-                  <p class="ph-foot">Katalog ditetapkan oleh sistem dan bersifat sementara. Variabel kustom tidak dapat dibuat.</p>
-                </div>
-              </div>
+            <div class="rte" id="rte">
+              ${toolbarHtml(phItems)}
+              <div id="rte-mount"></div>
             </div>
-            <textarea id="f-content" class="md-input" spellcheck="true" aria-required="true" placeholder="Tulis isi dokumen di sini. Contoh:&#10;&#10;## Ketentuan Umum&#10;&#10;Halo {{nama_lengkap}}, …" aria-describedby="content-help err-content"></textarea>
             <div id="err-content" class="content-issues"></div>
             <details class="format-help" id="content-help">
-              <summary>Format yang didukung</summary>
+              <summary>Format yang didukung dan pintasan keyboard</summary>
               <ul>
-                <li><code>## Judul</code>, <code>### Subjudul</code>, paragraf (pisahkan dengan baris kosong)</li>
-                <li><code>**tebal**</code>, <code>*miring*</code></li>
-                <li>Daftar <code>- item</code> dan daftar bernomor <code>1. item</code></li>
-                <li>Tabel: baris diawali dan diakhiri <code>|</code>, baris kedua <code>|---|---|</code>; setiap baris harus memiliki jumlah kolom yang sama</li>
-                <li>Placeholder hanya dari katalog sistem, mis. <code>{{nama_lengkap}}</code></li>
+                <li>Paragraf, judul bagian, dan subjudul</li>
+                <li>Tebal (<kbd>Ctrl</kbd>+<kbd>B</kbd>), miring (<kbd>Ctrl</kbd>+<kbd>I</kbd>), garis bawah (<kbd>Ctrl</kbd>+<kbd>U</kbd>)</li>
+                <li>Rata kiri, tengah, kanan (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd>/<kbd>E</kbd>/<kbd>R</kbd>)</li>
+                <li>Daftar berpoin dan bernomor; <kbd>Tab</kbd>/<kbd>Shift</kbd>+<kbd>Tab</kbd> mengubah tingkat butir</li>
+                <li>Tabel dengan baris header; di dalam tabel <kbd>Tab</kbd> berpindah sel</li>
+                <li>Urungkan (<kbd>Ctrl</kbd>+<kbd>Z</kbd>) dan ulangi (<kbd>Ctrl</kbd>+<kbd>Y</kbd>)</li>
+                <li>Placeholder hanya dari katalog sistem, tampil sebagai label (mis. “Nama lengkap”). Placeholder dapat disisipkan atau dihapus, tetapi kuncinya tidak dapat diubah.</li>
+                <li><kbd>Esc</kbd> atau <kbd>Alt</kbd>+<kbd>F10</kbd>: pindah ke toolbar. Di toolbar, gunakan tombol panah; <kbd>Esc</kbd> kembali ke isi dokumen.</li>
               </ul>
-              <p><strong>Tidak didukung:</strong> HTML mentah, gambar, skrip, dan ekspresi. Nilai placeholder selalu tampil sebagai teks biasa.</p>
+              <p><strong>Tidak didukung:</strong> gambar, tautan, skrip, gaya/warna, dan sel gabungan. Isi tempelan dibatasi ke format di atas. Nilai placeholder selalu tampil sebagai teks biasa.</p>
+              <p>Isi disimpan sebagai JSON terstruktur (format <code>${RT.FORMAT}</code> versi ${RT.FORMAT_VERSION}). Ukuran maksimal ${RT.LIMITS.contentJson.toLocaleString('id-ID')} karakter JSON; isi tidak pernah dipotong otomatis.</p>
             </details>
           </div>
           <section class="preview-col" id="preview-col" aria-labelledby="preview-h">
@@ -583,20 +617,245 @@
       </form>`;
   }
 
+  /** Legacy Markdown source: explain, then offer the explicit conversion. */
+  function renderConvert(t, e) {
+    const src = t.draft || S.latestVersion(t);
+    const what = e.legacy.label;
+    const errors = e.convertErrors;
+    return `
+      ${crumbs([{ label: 'Template', href: '#/' }, { label: t.internalName, href: `#/t/${t.id}` }, { label: 'Edit draf' }])}
+      <div class="page-head">
+        <div>
+          <h1 id="page-title" tabindex="-1">Edit draf</h1>
+          <p class="lede">${esc(what)} memakai format Markdown lama.</p>
+        </div>
+      </div>
+      ${permNotice()}
+      <section class="callout callout-info convert-panel" aria-labelledby="convert-h">
+        <h2 id="convert-h">Lanjutkan di editor visual</h2>
+        <p>Editor visual menyimpan isi sebagai JSON terstruktur. “Buat draf editor visual” membuat <strong>salinan JSON yang dapat diedit</strong> dari ${esc(what)}.</p>
+        <ul class="checklist">
+          <li>${e.legacy.draft
+            ? 'Isi draf Markdown diganti dengan salinan JSON yang setara, dan nomor revisi draf bertambah.'
+            : `${esc(what)} tetap tersimpan tanpa perubahan dan tetap ditampilkan dengan format aslinya.`}</li>
+          <li>Versi terbit serta dokumen yang sudah ditugaskan atau disetujui pengguna tidak diubah.</li>
+          <li>Teks, format, tabel, dan placeholder dipertahankan. Jika ada isi yang tidak dapat dipertahankan persis, tidak ada yang disimpan.</li>
+        </ul>
+        <p><button type="button" class="btn btn-primary" data-action="convert-legacy">Buat draf editor visual</button>
+          <a class="btn" href="#/t/${esc(t.id)}">Batal</a></p>
+      </section>
+      ${errors ? `
+        <div class="callout callout-danger" id="convert-error" tabindex="-1" role="alert" aria-labelledby="convert-error-h">
+          <h2 id="convert-error-h">Konversi gagal — tidak ada yang disimpan</h2>
+          <p>${esc(what)} tidak dapat dikonversi tanpa mengubah isinya:</p>
+          <ul>${errors.slice(0, 8).map((m) => `<li>${esc(m)}</li>`).join('')}</ul>
+          <p>Dokumen asli tidak berubah dan tetap dapat dibaca. Template ini belum dapat diedit di editor visual.</p>
+        </div>` : ''}
+      <section class="doc-panel doc-panel-solo" aria-label="Dokumen asli (hanya baca)">
+        <p class="doc-meta">Dokumen asli · ${esc(what)} · ${esc(formatLabel(src))} · hanya baca</p>
+        ${documentHtml(src.title, src)}
+      </section>`;
+  }
+
+  function convertLegacy() {
+    const e = app.editor;
+    if (!e || !e.legacy) return;
+    if (!app.perms.edit) { toast('Anda tidak memiliki izin Edit.', 'error'); return; }
+    try {
+      const t = S.convertLegacyDraft(app.data, e.templateId, e.lockVersion, ACTOR, now());
+      app.editor = newEditorSession(t);
+      toast(`Draf editor visual dibuat · revisi ${t.draft.revision}. ${e.legacy.draft ? 'Versi terbit' : e.legacy.label} tidak berubah.`);
+      render();
+    } catch (err) {
+      if (err instanceof S.StoreError && err.code === 'CONVERSION_FAILED') {
+        e.convertErrors = err.details.errors;
+        render();
+        const box = $('#convert-error');
+        if (box) box.focus();
+      } else if (err instanceof S.StoreError && err.code === 'CONFLICT') {
+        dropEditor();
+        toast('Template telah diubah oleh admin lain. Data terbaru dimuat; tidak ada yang dikonversi.', 'warn');
+        render();
+      } else handleStoreError(err);
+    }
+  }
+
+  /* Toolbar: grouped controls, WAI-ARIA toolbar with roving tabindex. */
+
+  const ICONS = {
+    undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
+    redo: '<path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/>',
+    alignLeft: '<path d="M4 6h16M4 10h10M4 14h16M4 18h10"/>',
+    alignCenter: '<path d="M4 6h16M7 10h10M4 14h16M7 18h10"/>',
+    alignRight: '<path d="M4 6h16M10 10h10M4 14h16M10 18h10"/>',
+    bulletList: '<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/>',
+    orderedList: '<path d="M10 6h10M10 12h10M10 18h10M4 4h1.5v4M4 8h3M4 14.5c0-1 2.5-1.5 2.5 0S4 17 4 18h3"/>',
+    insertTable: '<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9.5h18M3 15h18M9 4v16M15 4v16"/>',
+  };
+  const icon = (k) => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[k]}</svg>`;
+
+  const inTable = (ed) => ed.isActive('table');
+  const inList = (ed) => ed.isActive('listItem');
+  // `run` receives a Tiptap chain; `active` (toggle buttons only) sets aria-pressed.
+  const COMMANDS = {
+    undo: { run: (c) => c.undo() },
+    redo: { run: (c) => c.redo() },
+    paragraph: { run: (c) => c.setParagraph(), active: (ed) => ed.isActive('paragraph') },
+    h2: { run: (c) => c.toggleHeading({ level: 2 }), active: (ed) => ed.isActive('heading', { level: 2 }), block: true },
+    h3: { run: (c) => c.toggleHeading({ level: 3 }), active: (ed) => ed.isActive('heading', { level: 3 }), block: true },
+    bold: { run: (c) => c.toggleBold(), active: (ed) => ed.isActive('bold') },
+    italic: { run: (c) => c.toggleItalic(), active: (ed) => ed.isActive('italic') },
+    underline: { run: (c) => c.toggleUnderline(), active: (ed) => ed.isActive('underline') },
+    alignLeft: {
+      run: (c) => c.setTextAlign('left'),
+      active: (ed) => !ed.isActive({ textAlign: 'center' }) && !ed.isActive({ textAlign: 'right' }),
+    },
+    alignCenter: { run: (c) => c.setTextAlign('center'), active: (ed) => ed.isActive({ textAlign: 'center' }) },
+    alignRight: { run: (c) => c.setTextAlign('right'), active: (ed) => ed.isActive({ textAlign: 'right' }) },
+    bulletList: { run: (c) => c.toggleBulletList(), active: (ed) => ed.isActive('bulletList') },
+    orderedList: { run: (c) => c.toggleOrderedList(), active: (ed) => ed.isActive('orderedList') },
+    insertTable: { run: (c) => c.insertTable({ rows: 3, cols: 2, withHeaderRow: true }), block: true },
+    addRowAfter: { run: (c) => c.addRowAfter(), table: true },
+    deleteRow: { run: (c) => c.deleteRow(), table: true },
+    addColumnAfter: { run: (c) => c.addColumnAfter(), table: true },
+    deleteColumn: { run: (c) => c.deleteColumn(), table: true },
+    toggleHeaderRow: { run: (c) => c.toggleHeaderRow(), active: (ed) => inTable(ed) && ed.isActive('tableHeader'), table: true },
+    deleteTable: { run: (c) => c.deleteTable(), table: true },
+  };
+
+  function canRun(ed, key) {
+    const spec = COMMANDS[key];
+    if (spec.block && (inTable(ed) || inList(ed))) return false;
+    if (spec.table && !inTable(ed)) return false;
+    return spec.run(ed.can().chain()).run();
+  }
+
+  function toolbarHtml(phItems) {
+    const tool = (key, label, inner, shortcut) => {
+      const toggle = COMMANDS[key].active ? ' aria-pressed="false"' : '';
+      const keys = shortcut ? ` aria-keyshortcuts="${shortcut.aria}"` : '';
+      const tip = shortcut ? `${label} (${shortcut.text})` : label;
+      return `<button type="button" class="tool" tabindex="-1" data-action="fmt" data-fmt="${key}" aria-label="${label}" title="${tip}"${toggle}${keys}>${inner}</button>`;
+    };
+    const sc = (aria, text) => ({ aria, text });
+    const group = (label, items) => `<div class="tool-group" role="group" aria-label="${label}">${items}</div>`;
+    return `
+      <div class="rte-toolbar" role="toolbar" aria-label="Format dokumen" aria-controls="f-content">
+        ${group('Riwayat', tool('undo', 'Urungkan', icon('undo'), sc('Control+Z', 'Ctrl+Z')) + tool('redo', 'Ulangi', icon('redo'), sc('Control+Y', 'Ctrl+Y')))}
+        ${group('Jenis blok', tool('paragraph', 'Paragraf', '¶') + tool('h2', 'Judul bagian', 'H2', sc('Control+Alt+2', 'Ctrl+Alt+2')) + tool('h3', 'Subjudul', 'H3', sc('Control+Alt+3', 'Ctrl+Alt+3')))}
+        ${group('Format teks', tool('bold', 'Tebal', '<strong>B</strong>', sc('Control+B', 'Ctrl+B')) + tool('italic', 'Miring', '<em>I</em>', sc('Control+I', 'Ctrl+I')) + tool('underline', 'Garis bawah', '<u>U</u>', sc('Control+U', 'Ctrl+U')))}
+        ${group('Perataan', tool('alignLeft', 'Rata kiri', icon('alignLeft'), sc('Control+Shift+L', 'Ctrl+Shift+L')) + tool('alignCenter', 'Rata tengah', icon('alignCenter'), sc('Control+Shift+E', 'Ctrl+Shift+E')) + tool('alignRight', 'Rata kanan', icon('alignRight'), sc('Control+Shift+R', 'Ctrl+Shift+R')))}
+        ${group('Daftar', tool('bulletList', 'Daftar berpoin', icon('bulletList'), sc('Control+Shift+8', 'Ctrl+Shift+8')) + tool('orderedList', 'Daftar bernomor', icon('orderedList'), sc('Control+Shift+7', 'Ctrl+Shift+7')))}
+        ${group('Tabel', tool('insertTable', 'Sisipkan tabel', icon('insertTable')) +
+          tool('addRowAfter', 'Tambah baris di bawah', '+ Baris') + tool('deleteRow', 'Hapus baris', '− Baris') +
+          tool('addColumnAfter', 'Tambah kolom di kanan', '+ Kolom') + tool('deleteColumn', 'Hapus kolom', '− Kolom') +
+          tool('toggleHeaderRow', 'Baris header', 'Header') + tool('deleteTable', 'Hapus tabel', 'Hapus tabel'))}
+        <div class="tool-group" role="group" aria-label="Placeholder">
+          <div class="ph-wrap">
+            <button type="button" class="tool tool-ph" tabindex="-1" id="ph-btn" data-action="ph-toggle" aria-haspopup="menu" aria-expanded="false" aria-controls="ph-menu">Sisipkan placeholder ▾</button>
+            <div class="ph-menu" id="ph-menu" role="menu" aria-label="Katalog placeholder sistem" hidden>
+              ${phItems}
+              <p class="ph-foot">Katalog ditetapkan oleh sistem dan bersifat sementara. Variabel kustom tidak dapat dibuat.</p>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  const toolbarItems = () => Array.from(document.querySelectorAll('.rte-toolbar .tool'));
+
+  function setRoving(target) {
+    toolbarItems().forEach((b) => { b.tabIndex = b === target ? 0 : -1; });
+    app.editor.toolFocus = target.dataset.fmt || target.id;
+  }
+
+  function focusToolbar() {
+    const items = toolbarItems();
+    const current = items.find((b) => b.tabIndex === 0) || items[0];
+    if (current) current.focus();
+  }
+
+  function updateToolbar() {
+    const e = app.editor;
+    if (!e || !e.rte || !$('.rte-toolbar')) return;
+    const ed = e.rte;
+    toolbarItems().forEach((b) => {
+      const key = b.dataset.fmt;
+      if (!key) return;
+      const spec = COMMANDS[key];
+      const enabled = canRun(ed, key);
+      b.setAttribute('aria-disabled', String(!enabled));
+      if (spec.active) {
+        const on = enabled && spec.active(ed);
+        b.setAttribute('aria-pressed', String(on));
+      }
+    });
+    // Keep exactly one toolbar tab stop, remembered across re-renders.
+    const items = toolbarItems();
+    const keep = items.find((b) => (b.dataset.fmt || b.id) === e.toolFocus) || items[0];
+    items.forEach((b) => { b.tabIndex = b === keep ? 0 : -1; });
+  }
+
+  function runCommand(key, button) {
+    const e = app.editor;
+    if (!e || !e.rte || !COMMANDS[key]) return;
+    if (button) setRoving(button);
+    if (!canRun(e.rte, key)) return;
+    COMMANDS[key].run(e.rte.chain().focus()).run();
+  }
+
+  function mountRichText(e) {
+    const mount = $('#rte-mount');
+    if (!mount) return;
+    if (!EditorLib) {
+      mount.innerHTML = '<div class="callout callout-danger" role="alert"><p>Editor visual belum dibangun. Jalankan <code>npm install</code> dan <code>npm run build</code>, lalu muat ulang halaman.</p></div>';
+      return;
+    }
+    if (!e.rte) {
+      const holder = document.createElement('div');
+      holder.className = 'rte-holder';
+      e.rte = EditorLib.createEditor({
+        element: holder,
+        content: JSON.parse(JSON.stringify(e.content.document)),
+        catalogue: MD.PLACEHOLDERS,
+        attributes: {
+          id: 'f-content', class: 'rte-content', role: 'textbox', 'aria-multiline': 'true',
+          'aria-labelledby': 'content-label', 'aria-describedby': 'content-help err-content', 'aria-required': 'true',
+        },
+        onUpdate: (json) => {
+          if (app.editor !== e) return;
+          e.content = RT.wrap(json);
+          updateEditorLive();
+        },
+        onTransaction: () => { if (app.editor === e) updateToolbar(); },
+        onFocusToolbar: focusToolbar,
+      });
+      // Adopt the editor's normalized JSON (explicit default attributes) so
+      // merely loading a document does not count as an unsaved change.
+      const normalized = RT.wrap(e.rte.getJSON());
+      if (contentKey(e.content) === e.orig.content) e.orig.content = contentKey(normalized);
+      e.content = normalized;
+    }
+    // The editor instance (and its undo history) survives page re-renders.
+    mount.replaceWith(e.rte.options.element);
+    const toolbar = $('.rte-toolbar');
+    // Keep the editor selection when a toolbar button is clicked with the mouse.
+    toolbar.addEventListener('mousedown', (ev) => { if (ev.target.closest('.tool')) ev.preventDefault(); });
+    toolbar.addEventListener('focusin', (ev) => { const b = ev.target.closest('.tool'); if (b) setRoving(b); });
+  }
+
   function bindEditor() {
     const e = app.editor;
     const form = $('#editor-form');
     if (!e || !form) return;
     const name = $('#f-name');
     const title = $('#f-title');
-    const content = $('#f-content');
     name.value = e.internalName;
     title.value = e.title;
-    content.value = e.content;
     $('#f-code').value = e.code;
+    mountRichText(e);
     name.addEventListener('input', () => { e.internalName = name.value; updateEditorLive(); });
     title.addEventListener('input', () => { e.title = title.value; updateEditorLive(); });
-    content.addEventListener('input', () => { e.content = content.value; updateEditorLive(); });
     form.addEventListener('submit', (ev) => { ev.preventDefault(); saveDraft(); });
     form.addEventListener('keydown', (ev) => {
       if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 's') { ev.preventDefault(); saveDraft(); }
@@ -605,7 +864,7 @@
   }
 
   function editorErrors(e) {
-    return MD.validateDraft(e)
+    return RT.validateDraft(e)
       .filter((er) => e.attempted || er.kind !== 'required');
   }
 
@@ -647,8 +906,12 @@
         <ul>${shown.map((er) => `<li>${esc(er.message)}</li>`).join('')}</ul>
         ${contentErrs.length > shown.length ? `<p>+${contentErrs.length - shown.length} masalah lainnya</p>` : ''}
       </div>` : '');
-    $('#f-content').setAttribute('aria-invalid', String(contentErrs.length > 0));
-    $('#char-count').textContent = `${e.content.length.toLocaleString('id-ID')} / ${MD.LIMITS.content.toLocaleString('id-ID')} karakter`;
+    const area = $('#f-content');
+    if (area) area.setAttribute('aria-invalid', String(contentErrs.length > 0));
+    const size = RT.contentSize(e.content);
+    const count = $('#char-count');
+    count.textContent = `Ukuran isi: ${size.toLocaleString('id-ID')} / ${RT.LIMITS.contentJson.toLocaleString('id-ID')} karakter JSON`;
+    count.classList.toggle('is-over', size > RT.LIMITS.contentJson);
 
     // Error summary (only after a save attempt).
     setHtml($('#error-summary-slot'), e.attempted && errors.length ? `
@@ -660,12 +923,12 @@
 
     setHtml($('#conflict-slot'), conflictHtml(e));
 
-    // Preview.
+    // Preview: the same validated JSON renderer used for user snapshots.
     const grid = $('#editor-grid');
     grid.classList.toggle('with-preview', e.showPreview);
     $('#preview-col').hidden = !e.showPreview;
     $('#btn-preview').setAttribute('aria-pressed', String(e.showPreview));
-    if (e.showPreview) $('#preview-doc').innerHTML = documentHtml(e.title.trim(), e.content);
+    if (e.showPreview) setHtml($('#preview-doc'), documentHtml(e.title.trim(), { format: RT.FORMAT, content: e.content }));
 
     // Buttons.
     const saveBtn = $('#btn-save');
@@ -677,6 +940,7 @@
     else if (e.conflict) reason = 'Selesaikan konflik terlebih dahulu.';
     $('#btn-publish').disabled = Boolean(reason);
     $('#publish-hint').textContent = reason;
+    updateToolbar();
   }
 
   function conflictHtml(e) {
@@ -689,7 +953,7 @@
         <div class="callout callout-warn" role="alert">
           <h2>Draf telah diubah oleh admin lain</h2>
           <p>${what} Perubahan Anda belum disimpan.</p>
-          <p>Muat ulang untuk melanjutkan dari data terbaru. Salinan isi Anda akan tetap ditampilkan agar dapat disalin kembali.</p>
+          <p>Muat ulang untuk melanjutkan dari data terbaru. Teks Anda akan tetap ditampilkan agar dapat disalin kembali.</p>
           <p><button type="button" class="btn" data-action="reload-draft">Muat ulang draf terbaru</button></p>
         </div>`;
     }
@@ -697,11 +961,11 @@
       return `
         <div class="callout callout-info" role="note">
           <h2>Draf terbaru telah dimuat</h2>
-          <p>Editor kini berisi data terbaru. Isi Anda sebelum dimuat ulang tersedia di bawah (hanya baca).</p>
+          <p>Editor kini berisi data terbaru. Teks Anda sebelum dimuat ulang tersedia di bawah (hanya baca, tanpa format).</p>
           <details>
             <summary>Lihat isi Anda sebelumnya</summary>
             <label for="recovered" class="small">Judul: ${esc(e.recovered.title) || '—'}</label>
-            <textarea id="recovered" class="md-input recovered" readonly>\n${esc(e.recovered.content)}</textarea>
+            <textarea id="recovered" class="md-input recovered" readonly>\n${esc(e.recovered.text)}</textarea>
           </details>
           <p><button type="button" class="btn btn-ghost" data-action="dismiss-recovered">Tutup</button></p>
         </div>`;
@@ -711,11 +975,11 @@
 
   function saveDraft() {
     const e = app.editor;
-    if (!e) return;
+    if (!e || e.legacy) return;
     if (!app.perms.edit) { toast('Anda tidak memiliki izin Edit.', 'error'); return; }
     if (e.templateId && !isDirty(e)) return;
     e.attempted = true;
-    const errors = MD.validateDraft(e);
+    const errors = RT.validateDraft(e);
     if (errors.length) {
       updateEditorLive();
       const summary = $('#error-summary');
@@ -736,7 +1000,7 @@
       e.lockVersion = t.lockVersion;
       e.internalName = t.internalName;
       e.title = t.draft.title;
-      e.orig = { internalName: e.internalName, title: e.title, content: e.content };
+      e.orig = origOf(e);
       e.attempted = false;
       e.savedAt = t.draft.updatedAt;
       toast(`Draf tersimpan · revisi ${t.draft.revision}. Belum ada versi baru yang diterbitkan.`);
@@ -749,7 +1013,7 @@
 
   function handleStoreError(err) {
     if (!(err instanceof S.StoreError)) throw err;
-    if (err.code === 'CONFLICT' && app.editor) {
+    if (err.code === 'CONFLICT' && app.editor && !app.editor.legacy) {
       app.editor.conflict = err.details;
       render();
       const slot = $('#conflict-slot .callout');
@@ -759,7 +1023,7 @@
       toast('Template telah diubah oleh admin lain sejak Anda meninjaunya. Tidak ada yang diubah; tinjau data terbaru lalu coba lagi.', 'warn');
       render();
     } else if (err.code === 'ARCHIVED') {
-      app.editor = null;
+      dropEditor();
       toast(err.message, 'error');
       render();
     } else {
@@ -771,7 +1035,8 @@
     const e = app.editor;
     const t = e && S.getTemplate(app.data, e.templateId);
     if (!t) return;
-    const lost = { title: e.title, content: e.content };
+    const lost = { title: e.title, text: RT.plainText(e.content) };
+    dropEditor();
     app.editor = newEditorSession(t);
     app.editor.showPreview = e.showPreview;
     app.editor.recovered = lost;
@@ -779,50 +1044,11 @@
     toast('Draf terbaru dimuat.');
   }
 
-  function applyFormat(kind) {
-    const ta = $('#f-content');
-    if (!ta) return;
-    const { selectionStart: s, selectionEnd: end, value } = ta;
-    const sel = value.slice(s, end);
-    const wrap = (mark, fallback) => {
-      const text = sel || fallback;
-      ta.setRangeText(mark + text + mark, s, end, 'end');
-      ta.setSelectionRange(s + mark.length, s + mark.length + text.length);
-    };
-    const prefixLines = (fn) => {
-      const ls = value.lastIndexOf('\n', s - 1) + 1;
-      let le = value.indexOf('\n', end);
-      if (le === -1) le = value.length;
-      const lines = value.slice(ls, le).split('\n')
-        .map((l, i) => fn(l.replace(/^(#{1,6}\s+|\s*[-*+]\s+|\s*\d+[.)]\s+)/, ''), i));
-      ta.setRangeText(lines.join('\n'), ls, le, 'end');
-    };
-    const block = (text) => {
-      const before = value.slice(0, s);
-      const pre = !before || before.endsWith('\n\n') ? '' : (before.endsWith('\n') ? '\n' : '\n\n');
-      ta.setRangeText(pre + text + '\n', s, end, 'end');
-    };
-    switch (kind) {
-      case 'bold': wrap('**', 'teks tebal'); break;
-      case 'italic': wrap('*', 'teks miring'); break;
-      case 'h2': prefixLines((l) => '## ' + (l || 'Judul bagian')); break;
-      case 'h3': prefixLines((l) => '### ' + (l || 'Subjudul')); break;
-      case 'ul': prefixLines((l) => '- ' + (l || 'Butir')); break;
-      case 'ol': prefixLines((l, i) => `${i + 1}. ` + (l || 'Butir')); break;
-      case 'table': block('| Kolom 1 | Kolom 2 |\n|---|---|\n| Isi | Isi |'); break;
-      default: return;
-    }
-    ta.focus();
-    ta.dispatchEvent(new Event('input', { bubbles: true }));
-  }
-
   function insertPlaceholder(key) {
-    const ta = $('#f-content');
-    if (!ta) return;
-    ta.setRangeText(`{{${key}}}`, ta.selectionStart, ta.selectionEnd, 'end');
+    const e = app.editor;
     closePhMenu();
-    ta.focus();
-    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    if (!e || !e.rte) return;
+    e.rte.chain().focus().insertVariable(key).run();
   }
 
   function openPhMenu() {
@@ -871,7 +1097,9 @@
     if (!t.draft) return;
     const d = t.draft;
     const n = t.versions.length + 1;
-    const errors = MD.validateDraft({ internalName: t.internalName, title: d.title, content: d.content });
+    const errors = S.formatOf(d) === RT.FORMAT
+      ? S.validateRecord(t.internalName, d)
+      : [{ message: 'Draf Markdown lama harus dikonversi ke editor visual terlebih dahulu (Edit draf → Buat draf editor visual).' }];
     const previous = n === 1 ? 'Ini akan menjadi versi terbit pertama.'
       : `${n === 2 ? 'Versi 1' : `Versi 1–${n - 1}`} tetap tersimpan di riwayat.`;
     const body = `
@@ -898,7 +1126,7 @@
       onConfirm: () => {
         try {
           const v = S.publishDraft(app.data, id, expectedLock, ACTOR, now());
-          app.editor = null;
+          dropEditor();
           app.detailView[id] = 'published';
           toast(`Versi ${v.number} diterbitkan dan tersedia untuk integrasi mendatang.`);
           navigate(`#/t/${id}`);
@@ -1226,6 +1454,8 @@
     if (opts && opts.nav) {
       window.scrollTo(0, 0);
       if (heading) heading.focus({ preventScroll: true });
+    } else if (activeId === 'f-content' && app.editor && app.editor.rte) {
+      app.editor.rte.commands.focus();
     } else if (activeId) {
       const el = document.getElementById(activeId);
       if (el && !el.disabled) {
@@ -1275,14 +1505,16 @@
           $('#preview-col').scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
         break;
-      case 'fmt': applyFormat(el.dataset.fmt); break;
+      case 'fmt': runCommand(el.dataset.fmt, el); break;
+      case 'convert-legacy': convertLegacy(); break;
       case 'ph-toggle':
         if ($('#ph-menu').hidden) openPhMenu(); else closePhMenu(true);
         break;
       case 'ph-insert': insertPlaceholder(el.dataset.key); break;
       case 'focus-field': {
-        const target = { internalName: '#f-name', title: '#f-title', content: '#f-content' }[el.dataset.field];
-        if (target) $(target).focus();
+        const field = el.dataset.field;
+        if (field === 'content') { if (app.editor && app.editor.rte) app.editor.rte.commands.focus(); }
+        else if (field === 'internalName' || field === 'title') $(field === 'title' ? '#f-title' : '#f-name').focus();
         break;
       }
       case 'sim-conflict': {
@@ -1302,10 +1534,10 @@
       case 'reset-data':
       case 'clear-data':
         if (isDirty(app.editor) && !window.confirm('Perubahan draf belum disimpan akan hilang. Lanjutkan?')) break;
+        dropEditor();
         app.data = action === 'reset-data' ? S.createSeedState() : { nextId: 1, templates: [] };
         // Clearing templates leaves user snapshots alone: they never depend on templates.
         if (action === 'reset-data') app.user = U.createSeedUserState(app.data);
-        app.editor = null;
         app.detailView = {};
         app.list = { q: '', status: 'all', draftOnly: false };
         toast(action === 'reset-data' ? 'Data contoh dimuat ulang.' : 'Semua template contoh dikosongkan.');
@@ -1313,6 +1545,21 @@
         break;
       default: break;
     }
+  });
+
+  // Toolbar keyboard: arrows/Home/End move between controls; Esc returns to the document.
+  document.addEventListener('keydown', (ev) => {
+    const btn = ev.target.closest && ev.target.closest('.rte-toolbar .tool');
+    if (!btn) return;
+    const items = toolbarItems();
+    const idx = items.indexOf(btn);
+    let next = null;
+    if (ev.key === 'ArrowRight') next = items[(idx + 1) % items.length];
+    else if (ev.key === 'ArrowLeft') next = items[(idx - 1 + items.length) % items.length];
+    else if (ev.key === 'Home') next = items[0];
+    else if (ev.key === 'End') next = items[items.length - 1];
+    else if (ev.key === 'Escape' && app.editor && app.editor.rte) { ev.preventDefault(); app.editor.rte.commands.focus(); return; }
+    if (next) { ev.preventDefault(); setRoving(next); next.focus(); }
   });
 
   document.addEventListener('keydown', (ev) => {

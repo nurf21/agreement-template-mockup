@@ -1,0 +1,364 @@
+/*
+ * Structured rich-text documents ("richtext-json", formatVersion 1).
+ *
+ * The JSON envelope is the authoritative stored content:
+ *   { format: 'richtext-json', formatVersion: 1, document: { type: 'doc', content: [...] } }
+ *
+ * This module is the single, dependency-free path for:
+ * - validating structure (allowed nodes, marks, attributes, placeholder keys),
+ * - content rules (meaningful content, size limit, no {{...}} text),
+ * - rendering to HTML for the admin preview and new user snapshots.
+ * Rendering refuses any document that fails structural validation, escapes all
+ * text, and substitutes placeholder values as escaped plain text only.
+ */
+(function (root) {
+  'use strict';
+
+  const MD = (typeof module === 'object' && module.exports)
+    ? require('./markdown.js')
+    : root.AgreementMarkdown;
+
+  const FORMAT = 'richtext-json';
+  const FORMAT_VERSION = 1;
+  const KNOWN = new Map(MD.PLACEHOLDERS.map((p) => [p.key, p]));
+
+  // Size limit: length of JSON.stringify(envelope.document), in UTF-16 code
+  // units (JavaScript string length). Checked on save and publish; content is
+  // never truncated.
+  const LIMITS = Object.freeze({ contentJson: 200000, depth: 16 });
+
+  const ALIGN = (v) => v === null || v === 'left' || v === 'center' || v === 'right';
+  const ONE = (v) => v === 1;
+  const BLOCKS = ['paragraph', 'heading', 'bulletList', 'orderedList', 'table'];
+  const INLINE = ['text', 'variable'];
+  const CELL_CONTENT = ['paragraph', 'bulletList', 'orderedList'];
+  const CELL = {
+    content: CELL_CONTENT, min: 1,
+    attrs: { colspan: ONE, rowspan: ONE, colwidth: (v) => v === null },
+  };
+
+  /**
+   * Allowed nodes. `attrs` maps every allowed attribute to a value check;
+   * `required` lists attributes that must be present. Anything else is rejected.
+   */
+  const NODES = {
+    doc: { content: BLOCKS, min: 1 },
+    paragraph: { content: INLINE, attrs: { textAlign: ALIGN } },
+    heading: { content: INLINE, attrs: { level: (v) => v === 2 || v === 3, textAlign: ALIGN }, required: ['level'] },
+    bulletList: { content: ['listItem'], min: 1 },
+    orderedList: { content: ['listItem'], min: 1, attrs: { start: (v) => Number.isInteger(v) && v >= 1 && v <= 999999999 } },
+    listItem: { content: ['paragraph', 'bulletList', 'orderedList'], min: 1, first: 'paragraph' },
+    table: { content: ['tableRow'], min: 1 },
+    tableRow: { content: ['tableCell', 'tableHeader'], min: 1 },
+    tableCell: CELL,
+    tableHeader: CELL,
+    text: { leaf: true },
+    variable: { leaf: true, attrs: { key: (v) => KNOWN.has(v) }, required: ['key'] },
+  };
+  const MARKS = new Set(['bold', 'italic', 'underline']);
+  const NODE_KEYS = new Set(['type', 'attrs', 'content', 'marks', 'text']);
+
+  const NAMES = {
+    paragraph: 'paragraf', heading: 'judul', bulletList: 'daftar berpoin', orderedList: 'daftar bernomor',
+    listItem: 'butir daftar', table: 'tabel', tableRow: 'baris tabel', tableCell: 'sel tabel',
+    tableHeader: 'sel header', text: 'teks', variable: 'placeholder',
+  };
+  const nameOf = (type) => NAMES[type] || `“${String(type).slice(0, 40)}”`;
+  const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+  function isEnvelope(value) {
+    return isObj(value) && value.format === FORMAT;
+  }
+
+  function emptyContent() {
+    return { format: FORMAT, formatVersion: FORMAT_VERSION, document: { type: 'doc', content: [{ type: 'paragraph' }] } };
+  }
+
+  function wrap(document) {
+    return { format: FORMAT, formatVersion: FORMAT_VERSION, document };
+  }
+
+  /**
+   * Structural validation. Returns a list of issues; an empty list means the
+   * document only uses the supported nodes, marks, and attributes.
+   */
+  function structureIssues(envelope) {
+    const issues = [];
+    const add = (where, message) => issues.push({
+      field: 'content', kind: 'structure', message: (where ? where + ': ' : '') + message,
+    });
+
+    if (!isObj(envelope)) { add('', 'Isi dokumen harus berupa JSON terstruktur.'); return issues; }
+    const extra = Object.keys(envelope).filter((k) => !['format', 'formatVersion', 'document'].includes(k));
+    if (envelope.format !== FORMAT) add('', `Format isi tidak didukung (diharapkan “${FORMAT}”).`);
+    if (envelope.formatVersion !== FORMAT_VERSION) add('', `Versi format tidak didukung (diharapkan ${FORMAT_VERSION}).`);
+    if (extra.length) add('', 'Properti tidak dikenal pada isi dokumen: ' + extra.join(', ') + '.');
+    if (!isObj(envelope.document) || envelope.document.type !== 'doc') {
+      add('', 'Dokumen harus berupa node “doc”.');
+      return issues;
+    }
+
+    const visit = (node, parentType, where, depth) => {
+      if (issues.length >= 50) return;
+      if (!isObj(node) || typeof node.type !== 'string') { add(where, 'Elemen tidak valid.'); return; }
+      const spec = NODES[node.type];
+      if (!spec || node.type === 'doc' && parentType) { add(where, `Jenis elemen ${nameOf(node.type)} tidak didukung.`); return; }
+      if (depth > LIMITS.depth) { add(where, 'Struktur terlalu dalam.'); return; }
+      const parent = NODES[parentType];
+      if (parent && !parent.content.includes(node.type)) {
+        add(where, `${nameOf(node.type)} tidak diizinkan di dalam ${parentType === 'doc' ? 'dokumen' : nameOf(parentType)}.`);
+        return;
+      }
+      const unknownKeys = Object.keys(node).filter((k) => !NODE_KEYS.has(k));
+      if (unknownKeys.length) add(where, `Properti tidak dikenal pada ${nameOf(node.type)}: ${unknownKeys.join(', ')}.`);
+
+      // Attributes.
+      if (node.attrs !== undefined && !isObj(node.attrs)) add(where, `Atribut ${nameOf(node.type)} tidak valid.`);
+      const attrs = isObj(node.attrs) ? node.attrs : {};
+      const allowed = spec.attrs || {};
+      Object.keys(attrs).forEach((k) => {
+        if (!allowed[k]) add(where, `Atribut “${String(k).slice(0, 40)}” tidak didukung pada ${nameOf(node.type)}.`);
+        else if (!allowed[k](attrs[k])) {
+          if (node.type === 'variable' && k === 'key') add(where, `Placeholder “${String(attrs[k]).slice(0, 40)}” tidak ada dalam katalog sistem.`);
+          else if (k === 'colspan' || k === 'rowspan') add(where, 'Sel tabel gabungan tidak didukung.');
+          else add(where, `Nilai atribut “${k}” tidak didukung pada ${nameOf(node.type)}.`);
+        }
+      });
+      (spec.required || []).forEach((k) => { if (!(k in attrs)) add(where, `Atribut “${k}” wajib pada ${nameOf(node.type)}.`); });
+
+      // Marks (inline nodes only).
+      if (node.marks !== undefined) {
+        if (!INLINE.includes(node.type) || !Array.isArray(node.marks)) add(where, `Format teks tidak valid pada ${nameOf(node.type)}.`);
+        else {
+          const seen = new Set();
+          node.marks.forEach((mk) => {
+            const ok = isObj(mk) && MARKS.has(mk.type) && Object.keys(mk).every((k) => k === 'type' || (k === 'attrs' && isObj(mk.attrs) && !Object.keys(mk.attrs).length));
+            if (!ok) add(where, `Format teks ${isObj(mk) && typeof mk.type === 'string' ? `“${mk.type.slice(0, 40)}” ` : ''}tidak didukung.`);
+            else if (seen.has(mk.type)) add(where, `Format teks “${mk.type}” ganda.`);
+            else seen.add(mk.type);
+          });
+        }
+      }
+
+      if (node.type === 'text') {
+        if (typeof node.text !== 'string' || !node.text.length) add(where, 'Teks kosong atau tidak valid.');
+        if (node.content !== undefined) add(where, 'Teks tidak boleh memiliki isi turunan.');
+        return;
+      }
+      if (node.text !== undefined) add(where, `${nameOf(node.type)} tidak boleh memiliki properti teks.`);
+      if (spec.leaf) {
+        if (node.content !== undefined) add(where, `${nameOf(node.type)} tidak boleh memiliki isi turunan.`);
+        return;
+      }
+
+      // Children.
+      if (node.content !== undefined && !Array.isArray(node.content)) { add(where, `Isi ${nameOf(node.type)} tidak valid.`); return; }
+      const kids = node.content || [];
+      if (kids.length < (spec.min || 0)) add(where, `${node.type === 'doc' ? 'Dokumen' : nameOf(node.type)} tidak boleh kosong.`);
+      if (spec.first && kids.length && isObj(kids[0]) && kids[0].type !== spec.first) {
+        add(where, `${nameOf(node.type)} harus diawali paragraf.`);
+      }
+      if (node.type === 'table') {
+        const widths = kids.map((r) => (isObj(r) && Array.isArray(r.content) ? r.content.length : 0));
+        if (widths.some((w) => w !== widths[0])) add(where, 'Setiap baris tabel harus memiliki jumlah sel yang sama.');
+      }
+      kids.forEach((child, idx) => {
+        const here = node.type === 'doc' ? `Blok ${idx + 1}` : where;
+        visit(child, node.type, here, depth + 1);
+      });
+    };
+    visit(envelope.document, null, '', 0);
+    return issues;
+  }
+
+  function walk(node, fn) {
+    if (!isObj(node)) return;
+    fn(node);
+    if (Array.isArray(node.content)) node.content.forEach((c) => walk(c, fn));
+  }
+
+  /** Text or an approved placeholder; empty paragraphs/tables, marks, and whitespace do not count. */
+  function hasMeaningfulContent(envelope) {
+    let found = false;
+    walk(envelope && envelope.document, (n) => {
+      if (n.type === 'text' && typeof n.text === 'string' && /\S/.test(n.text)) found = true;
+      if (n.type === 'variable' && n.attrs && KNOWN.has(n.attrs.key)) found = true;
+    });
+    return found;
+  }
+
+  function contentSize(envelope) {
+    return JSON.stringify(isObj(envelope) ? envelope.document : envelope ?? null).length;
+  }
+
+  function placeholderKeys(envelope) {
+    const keys = [];
+    walk(envelope && envelope.document, (n) => {
+      if (n.type === 'variable' && n.attrs && !keys.includes(n.attrs.key)) keys.push(n.attrs.key);
+    });
+    return keys;
+  }
+
+  /** All content issues: structure first, then the content rules. */
+  function contentIssues(envelope) {
+    if (typeof envelope === 'string') {
+      return [{ field: 'content', kind: 'format', message: 'Isi dokumen harus memakai format editor visual (richtext-json). Markdown hanya didukung untuk versi lama.' }];
+    }
+    const issues = structureIssues(envelope);
+    const size = contentSize(envelope);
+    if (size > LIMITS.contentJson) {
+      issues.push({
+        field: 'content', kind: 'length',
+        message: `Ukuran isi dokumen maksimal ${LIMITS.contentJson.toLocaleString('id-ID')} karakter JSON (saat ini ${size.toLocaleString('id-ID')}). Kurangi isi dokumen; tidak ada teks yang dipotong otomatis.`,
+      });
+    }
+    if (issues.length) return issues;
+    if (!hasMeaningfulContent(envelope)) {
+      issues.push({ field: 'content', kind: 'required', message: 'Isi dokumen wajib diisi.' });
+    }
+    let braces = 0;
+    walk(envelope.document, (n) => { if (n.type === 'text' && /\{\{|\}\}/.test(n.text)) braces++; });
+    if (braces) {
+      issues.push({
+        field: 'content', kind: 'format',
+        message: 'Teks tidak boleh berisi kurung kurawal ganda {{ atau }}. Gunakan tombol “Sisipkan placeholder” untuk menyisipkan placeholder dari katalog.',
+      });
+    }
+    return issues;
+  }
+
+  /** Validate a draft whose content is a rich-text envelope. Same rules for save and publish. */
+  function validateDraft(draft) {
+    return MD.validateMeta(draft).concat(contentIssues(draft.content));
+  }
+
+  /* ---------- Rendering ---------- */
+
+  const esc = MD.escapeHtml;
+  const MARK_TAGS = [['bold', 'strong'], ['italic', 'em'], ['underline', 'u']];
+
+  function withMarks(html, marks) {
+    const set = new Set((marks || []).map((m) => m.type));
+    return MARK_TAGS.reduceRight((acc, [type, tag]) => (set.has(type) ? `<${tag}>${acc}</${tag}>` : acc), html);
+  }
+
+  const alignAttr = (attrs) => (attrs && (attrs.textAlign === 'center' || attrs.textAlign === 'right')
+    ? ` class="align-${attrs.textAlign}"` : '');
+
+  function renderNode(node, values) {
+    const kids = (list) => (list || []).map((c) => renderNode(c, values)).join('');
+    switch (node.type) {
+      case 'text': return withMarks(esc(node.text), node.marks);
+      case 'variable': {
+        const key = node.attrs.key;
+        const token = '{{' + key + '}}';
+        const html = values && Object.prototype.hasOwnProperty.call(values, key)
+          ? `<span class="ph-value" title="Nilai contoh untuk ${esc(token)}">${esc(String(values[key]))}</span>`
+          : `<span class="ph-token">${esc(token)}</span>`;
+        return withMarks(html, node.marks);
+      }
+      case 'paragraph': return `<p${alignAttr(node.attrs)}>${kids(node.content)}</p>`;
+      // The document title is <h2>, so section headings start at <h3>.
+      case 'heading': {
+        const tag = 'h' + (node.attrs.level + 1);
+        return `<${tag}${alignAttr(node.attrs)}>${kids(node.content)}</${tag}>`;
+      }
+      case 'bulletList': return `<ul>${kids(node.content)}</ul>`;
+      case 'orderedList': {
+        const start = node.attrs && node.attrs.start;
+        return `<ol${start && start !== 1 ? ` start="${start}"` : ''}>${kids(node.content)}</ol>`;
+      }
+      case 'listItem': return `<li>${kids(node.content)}</li>`;
+      case 'table': {
+        const rows = node.content;
+        const headRow = rows[0].content.every((c) => c.type === 'tableHeader');
+        const row = (r, inHead) => '<tr>' + r.content.map((c) => {
+          if (c.type === 'tableHeader') return `<th scope="${inHead ? 'col' : 'row'}">${kids(c.content)}</th>`;
+          return `<td>${kids(c.content)}</td>`;
+        }).join('') + '</tr>';
+        const body = (headRow ? rows.slice(1) : rows).map((r) => row(r, false)).join('');
+        return '<div class="table-wrap"><table>' +
+          (headRow ? `<thead>${row(rows[0], true)}</thead>` : '') +
+          (body ? `<tbody>${body}</tbody>` : '') + '</table></div>';
+      }
+      default: throw new Error('Unsupported node: ' + node.type);
+    }
+  }
+
+  /**
+   * Render a validated envelope to HTML. Throws if the structure is invalid.
+   * `values` (optional) maps placeholder keys to plain-text values.
+   */
+  function renderDocument(envelope, values) {
+    const issues = structureIssues(envelope);
+    if (issues.length) {
+      const err = new Error('Dokumen tidak valid: ' + issues[0].message);
+      err.issues = issues;
+      throw err;
+    }
+    return envelope.document.content.map((n) => renderNode(n, values)).join('\n');
+  }
+
+  /** Plain-text view (e.g. to show an admin's unsaved text after a conflict). */
+  function plainText(envelope) {
+    const out = [];
+    const inline = (n) => (n.content || []).map((c) => {
+      if (c.type === 'text') return c.text;
+      if (c.type === 'variable') return '[' + ((KNOWN.get(c.attrs && c.attrs.key) || {}).label || '?') + ']';
+      return inline(c);
+    }).join('');
+    const block = (n) => {
+      if (n.type === 'paragraph' || n.type === 'heading') out.push(inline(n));
+      else if (n.type === 'tableRow') out.push((n.content || []).map((c) => (c.content || []).map(inline).join(' ')).join(' | '));
+      else (n.content || []).forEach(block);
+    };
+    if (envelope && isObj(envelope.document)) block(envelope.document);
+    return out.join('\n');
+  }
+
+  /* ---------- Legacy Markdown conversion ---------- */
+
+  const textOf = (html) => html
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&(amp|lt|gt|quot|#39);/g, (_, e) => ({ amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" })[e])
+    .replace(/\s+/g, ' ').trim();
+
+  /**
+   * Convert supported legacy Markdown to a new envelope. Returns
+   * `{ ok: true, content }` or `{ ok: false, errors }`. The result is checked
+   * by the same validator, and its rendered text must equal the legacy
+   * rendering; otherwise nothing is returned (no partial conversion).
+   */
+  function convertMarkdown(source) {
+    const res = MD.toRichTextDocument(source);
+    if (!res.document) return { ok: false, errors: res.errors };
+    const content = wrap(res.document);
+    const issues = contentIssues(content);
+    if (issues.length) return { ok: false, errors: issues.map((i) => i.message) };
+    if (textOf(renderDocument(content, null)) !== textOf(MD.renderMarkdown(source, null))) {
+      return { ok: false, errors: ['Hasil konversi tidak sama persis dengan teks aslinya.'] };
+    }
+    return { ok: true, content };
+  }
+
+  function deepFreeze(value) {
+    if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+      Object.values(value).forEach(deepFreeze);
+      Object.freeze(value);
+    }
+    return value;
+  }
+
+  /** Detached, frozen copy for storage. */
+  function freezeCopy(envelope) {
+    return deepFreeze(JSON.parse(JSON.stringify(envelope)));
+  }
+
+  const api = {
+    FORMAT, FORMAT_VERSION, LIMITS, isEnvelope, emptyContent, wrap, structureIssues, contentIssues,
+    hasMeaningfulContent, contentSize, placeholderKeys, validateDraft, renderDocument, plainText,
+    convertMarkdown, freezeCopy,
+  };
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  else root.AgreementRichText = api;
+})(this);
