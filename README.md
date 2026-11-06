@@ -6,25 +6,53 @@ Interactive mockup (Bahasa Indonesia UI) with two sides:
 - **Aplikasi Pengguna** (mobile-first): a simulated user reads and accepts
   agreements explicitly assigned to them.
 
-Plain HTML/CSS/JS, no build step, no backend: all data is in-memory mock data
-that resets on page reload. The dark bar at the top switches between the two
-sides; it exists only in the mockup.
+Plain HTML/CSS/JS with one bundled script for the visual editor; no backend:
+all data is in-memory mock data that resets on page reload. The dark bar at the
+top switches between the two sides; it exists only in the mockup.
 
-## Run
+## Install and run
 
-Open `index.html` in a browser (works from `file://`), or serve the folder:
+Requires Node.js 18+ (tested with 24).
+
+```bash
+npm install       # once: Tiptap (editor) and esbuild (bundler), jsdom (tests)
+npm run build     # bundles src/editor.js -> dist/editor.js (needed after install and after editing src/)
+```
+
+Then open `index.html` in a browser (works from `file://`), or serve the folder:
 
 ```bash
 python3 -m http.server 8000   # then open http://127.0.0.1:8000
 ```
 
+Alternatively `npm start` serves the folder at http://127.0.0.1:8000 and
+rebuilds the editor bundle on each page load (esbuild serve mode; keep the
+terminal open). Without the bundle the editor page shows “Editor visual belum
+dibangun” instead of an editor; everything else still works.
+
+Only `src/editor.js` is bundled. All other scripts (`js/*.js`) are plain
+browser scripts loaded directly, so there is no other build step.
+
 ## Test
 
 ```bash
-npm test          # markdown, template lifecycle store, user assignments/acceptance (node:test, no deps)
-npm install       # once, for jsdom
-npm run test:ui   # jsdom: admin smoke test (tests/ui-smoke.js) + user flow (tests/ui-user.js)
+npm test          # node:test: rich-text JSON, legacy Markdown, lifecycle store, user assignments/acceptance
+npm run test:ui   # builds the bundle, then jsdom: admin smoke, user flow, visual editor (tests/ui-*.js)
 ```
+
+The UI tests run Tiptap inside jsdom (DOM simulation without layout). Layout,
+real keyboard input, and real paste events were additionally checked manually in
+headless Chromium; that script is not part of the repository.
+
+## Dependencies
+
+| Package | Use | License |
+|---|---|---|
+| `@tiptap/core`, `@tiptap/pm`, `@tiptap/starter-kit`, `@tiptap/extension-list`, `@tiptap/extension-table`, `@tiptap/extension-text-align` | Visual editor (ProseMirror-based); bundled into `dist/editor.js` | MIT |
+| `esbuild` (dev) | Bundles the editor | MIT |
+| `jsdom` (dev) | UI tests | MIT |
+
+No Tiptap Pro/paid extensions are used. `dist/` is generated and git-ignored.
 
 ## What it models
 
@@ -34,10 +62,12 @@ npm run test:ui   # jsdom: admin smoke test (tests/ui-smoke.js) + user flow (tes
 - **Editing a published template** opens a copy of the latest version; the
   draft is created on first save.
 - **Required fields:** "Nama internal", "Judul dokumen", and "Isi dokumen" must
-  each contain non-whitespace text. The same rules apply to saving a draft and to
+  each contain non-whitespace text. For "Isi dokumen" that means at least one
+  non-whitespace character of text or one catalogue placeholder; empty
+  paragraphs, empty tables, formatting marks, and whitespace alone do not count. The same rules apply to saving a draft and to
   publishing. A new editor may start empty; a save attempt with missing fields
   shows an error next to each field plus a focused error summary (`role="alert"`)
-  and saves nothing. Length limits, Markdown validation, and placeholder rules
+  and saves nothing. Length limits, JSON validation, and placeholder rules
   are unchanged.
 - **Concurrency (`lockVersion`):** every template has a `lockVersion` that goes
   up by one on each successful save, publication, and archival. It is separate
@@ -85,11 +115,15 @@ notice under the user header says so on every user page.
   simulation control below. Only published versions of non-archived templates
   can be assigned; drafts never reach the user side.
 - Each assignment pins an immutable, frozen **snapshot**: template ID and code,
-  version number, title, Markdown content, the synthetic values used, and the
-  rendered HTML. Reading and accepting always use the snapshot, so later
-  publications or profile changes never alter it.
-- Rendering reuses the admin Markdown renderer; placeholder values are escaped
-  plain text. Every placeholder in the content is required. If the profile has
+  version number, title, content, the synthetic values used, and the rendered
+  HTML. For a rich-text version the snapshot also records `format`
+  (`richtext-json`) and `formatVersion`, and holds a deep-frozen copy of the
+  JSON content. Legacy Markdown snapshots keep their original shape (Markdown
+  string, no `format`). Reading and accepting always use the snapshot, so later
+  edits, publications, conversions, or profile changes never alter it.
+- Rich-text snapshots are rendered by the same validated JSON renderer as the
+  admin preview; legacy snapshots by the legacy Markdown renderer. Placeholder
+  values are escaped plain text in both. Every placeholder in the content is required. If the profile has
   no (or a blank) value, the snapshot records it as missing, no HTML is rendered,
   the page shows “Dokumen tidak tersedia”, and acceptance is disabled. Values are
   never silently replaced by empty text.
@@ -135,35 +169,169 @@ Everything lives in memory (`app.data` for templates, `app.user` for profile,
 assignments, and acceptances). Reloading the page resets all sample data,
 including acceptances. “Muat ulang data contoh” resets both sides; “Kosongkan
 data” empties templates only, and existing user snapshots stay readable because
-they do not depend on templates.
+they do not depend on templates. Drafts, versions, JSON content, conversions,
+and the editor's undo history are never written to `localStorage`, files, or a
+server; nothing survives a reload.
 
-## Markdown subset
+## Visual editor
 
-Supported: `#`–`###` headings, paragraphs, `**bold**`, `*italic*`, `-`/`1.`
-lists, pipe tables. Everything else is escaped. Validation rejects raw HTML,
-images, `${…}`, expressions in `{{…}}`, and placeholders outside the fixed
-catalogue. Placeholder values are substituted after parsing and escaped, so they
-always render as plain text.
+The admin editor (“Isi dokumen”) is a Tiptap/ProseMirror editor. Its schema
+only contains the supported nodes, so it cannot produce anything else.
 
-Tables must have the same number of columns in the header, the separator row
-(`|---|---|`), and every data row. Inconsistent tables are rejected on save and
-publish with an error naming the line, e.g. `Baris 6: Baris tabel memiliki 3
-kolom, sedangkan header tabel (baris 3) memiliki 2 kolom.` The live preview
-never drops cells: a malformed table is shown as escaped literal text under a
-notice instead of as a table.
+| Group | Controls | Keyboard |
+|---|---|---|
+| Riwayat | Urungkan, Ulangi | `Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z` |
+| Jenis blok | Paragraf, Judul bagian (H2), Subjudul (H3) | `Ctrl+Alt+0/2/3` |
+| Format teks | Tebal, Miring, Garis bawah | `Ctrl+B`, `Ctrl+I`, `Ctrl+U` |
+| Perataan | Rata kiri, tengah, kanan | `Ctrl+Shift+L/E/R` |
+| Daftar | Daftar berpoin, bernomor | `Ctrl+Shift+8/7`; `Tab`/`Shift+Tab` nest |
+| Tabel | Sisipkan tabel (3×2 with header row), + / − baris, + / − kolom, Baris header, Hapus tabel | `Tab` moves between cells |
+| Placeholder | Sisipkan placeholder (menu) | arrows, `Enter`, `Esc` |
 
-The catalogue currently holds one **provisional** placeholder,
-`{{nama_lengkap}}`; sample value only.
+- The toolbar is one tab stop (WAI-ARIA toolbar, roving tabindex): arrow keys,
+  `Home`/`End` move inside it; `Esc` returns to the document. `Esc` or
+  `Alt+F10` in the document moves to the toolbar, so `Tab` inside tables is
+  never a keyboard trap. Toggle buttons expose `aria-pressed`; unavailable
+  commands (e.g. row controls outside a table) are `aria-disabled`.
+- Headings and tables are not available inside lists or table cells.
+- The toolbar wraps on narrow screens; the page never scrolls horizontally.
+- Pasted content is parsed against the editor schema: scripts and event
+  handlers never run, and images, links, colours/fonts/other styles,
+  strikethrough, code, quotes, rules, merged-cell widths, and list styles are
+  dropped while their text is kept. Unknown placeholder elements become plain
+  text. The resulting JSON is validated again before save and publish.
+- The editor instance survives page re-renders, so undo history is kept after
+  saving.
+
+### Placeholders
+
+Placeholders are atomic inline nodes `{"type": "variable", "attrs": {"key":
+"nama_lengkap"}}`, shown in the editor as a chip labelled with the catalogue
+label (“Nama lengkap”). Admins can insert one from the fixed system catalogue or
+delete it as a whole; the key cannot be edited, and keys outside the catalogue
+are refused by the editor and by validation. The catalogue still holds one
+**provisional** placeholder, `nama_lengkap` (sample value only).
+
+Typed text such as `{{nama_lengkap}}` is *not* a placeholder: text containing
+`{{` or `}}` is rejected with a hint to use “Sisipkan placeholder”.
+
+Placeholder values are always substituted as escaped plain text inside
+`<span class="ph-value">`; they never become HTML, editor nodes, or formatting.
+
+## Document format (`richtext-json`, version 1)
+
+New drafts and new published versions store content as a versioned JSON
+envelope; this JSON is the authoritative content (HTML is only derived output):
+
+```json
+{
+  "format": "richtext-json",
+  "formatVersion": 1,
+  "document": {
+    "type": "doc",
+    "content": [
+      { "type": "heading", "attrs": { "level": 2, "textAlign": null },
+        "content": [{ "type": "text", "text": "Ketentuan Umum" }] },
+      { "type": "paragraph", "attrs": { "textAlign": "center" },
+        "content": [
+          { "type": "text", "text": "Halo " },
+          { "type": "variable", "attrs": { "key": "nama_lengkap" }, "marks": [{ "type": "bold" }] }
+        ] }
+    ]
+  }
+}
+```
+
+Records also carry `format: "richtext-json"` next to `title`, as the format
+discriminator. Records without `format` are legacy Markdown.
+
+Allowed structure (`js/richtext.js`; anything else is rejected, never dropped):
+
+| Node | Children | Attributes |
+|---|---|---|
+| `doc` | ≥1 of `paragraph`, `heading`, `bulletList`, `orderedList`, `table` | — |
+| `paragraph` | `text`, `variable` | `textAlign`: `null`/`left`/`center`/`right` |
+| `heading` | `text`, `variable` | `level`: 2 or 3 (required); `textAlign` |
+| `bulletList`, `orderedList` | ≥1 `listItem` | `orderedList.start`: integer ≥ 1 |
+| `listItem` | `paragraph` first, then `paragraph`/lists | — |
+| `table` | ≥1 `tableRow`, all with the same number of cells | — |
+| `tableRow` | ≥1 `tableCell`/`tableHeader` | — |
+| `tableCell`, `tableHeader` | ≥1 `paragraph`/lists | `colspan` 1, `rowspan` 1, `colwidth` `null` (no merged cells) |
+| `text` | — | non-empty `text`; `marks`: `bold`, `italic`, `underline` (no attributes, no duplicates) |
+| `variable` | — | `key` from the catalogue (required); may carry marks |
+
+Unknown properties, attributes, marks, or nodes, a wrong `format` /
+`formatVersion`, and nesting deeper than 16 levels are reported with the
+top-level block number (e.g. `Blok 3: Jenis elemen “image” tidak didukung.`).
+
+**Size limit:** `JSON.stringify(envelope.document).length` must be at most
+200 000 (JavaScript string length, i.e. UTF-16 code units, of the serialized
+document). The editor shows the current size. A larger document is rejected on
+save and publish; nothing is truncated and no table cells are discarded.
+
+**Rendering** (`RT.renderDocument`) validates the structure first and refuses
+invalid documents. All text is HTML-escaped. Headings render as `<h3>`/`<h4>`
+(below the document title `<h2>`); alignment uses `align-center` /
+`align-right` classes (no inline styles); a first row of header cells becomes
+`<thead>` with `scope="col"`, other header cells `scope="row"`. This single
+path is used for the admin preview, draft and version views, and new user
+snapshots of rich-text versions. The admin preview uses synthetic sample values
+only.
+
+## Legacy Markdown compatibility
+
+- Existing published Markdown versions and existing user snapshots are kept
+  exactly as they were (no `format` field; content is the Markdown string).
+- Reading a legacy version (version view, detail page, user document) uses the
+  original Markdown renderer (`js/markdown.js`). Nothing is converted
+  automatically — not on reading, publishing, assigning, or accepting.
+- Assigning a still-published legacy version creates a snapshot in the legacy
+  shape, rendered by the legacy renderer.
+- **Explicit conversion:** opening “Edit” on a template whose latest version (or
+  existing draft) is Markdown shows the original read-only plus the action
+  **“Buat draf editor visual”**, which explains that it creates an editable
+  JSON copy and leaves the original version unchanged. Confirming creates (or,
+  for a legacy Markdown draft, replaces) the draft with the JSON copy: draft
+  revision and `lockVersion` go up, the published version is untouched, and the
+  draft records `convertedFrom` (e.g. `{ "format": "markdown", "version": 2 }`).
+- Conversion supports the legacy subset: `#`–`###` headings (at most two
+  distinct levels), paragraphs, `**bold**`/`__bold__`, `*italic*`/`_italic_`,
+  `-`/`1.` lists (start number kept), pipe tables (header row becomes header
+  cells), and catalogue placeholders (become placeholder nodes, keeping
+  surrounding bold/italic). It reuses the legacy inline renderer, validates the
+  result, and checks that the rendered text equals the legacy rendering. If
+  anything cannot be preserved (three heading levels, unknown placeholders,
+  invalid legacy content, any text mismatch), a focused error lists the reasons
+  and nothing is saved.
+- Legacy Markdown drafts cannot be published (`LEGACY_FORMAT`); convert them
+  first. Saving always requires JSON content, so every new draft is JSON.
+- Legacy Markdown rules (kept for reading and conversion only): `#`–`###`
+  headings, paragraphs, `**bold**`, `*italic*`, `-`/`1.` lists, pipe tables;
+  everything else escaped; raw HTML, images, `${…}`, expressions, unknown
+  placeholders, and tables with inconsistent column counts are invalid.
+
+### Seed data formats
+
+| Template | Published versions | Draft |
+|---|---|---|
+| `tpl_1` Persetujuan Layanan Umum | v1, v2 Markdown | JSON, revision 3, converted from Markdown Versi 2 |
+| `tpl_2` Ketentuan Program Rujukan | v1 Markdown | — (Edit → conversion offer) |
+| `tpl_3` Persetujuan Komunikasi Pemasaran | — | JSON, revision 2 (shows centre alignment, italic, underline) |
+| `tpl_4` Pemberitahuan Perubahan Layanan | v1–v3 Markdown | — (Edit → conversion offer) |
+| `tpl_5` Ketentuan Dompet (archived) | v1 Markdown | Markdown (read-only; archived) |
 
 ## Files
 
-- `js/markdown.js` — renderer, validator, placeholder catalogue
-- `js/store.js` — lifecycle operations and seed data
+- `js/richtext.js` — `richtext-json` validator, content rules, renderer, conversion wrapper
+- `js/markdown.js` — placeholder catalogue, shared name/title rules, legacy Markdown renderer/validator, Markdown → JSON converter
+- `js/store.js` — lifecycle operations (incl. explicit conversion), format discriminator, seed data
+- `src/editor.js` — Tiptap editor configuration and placeholder node (bundled to `dist/editor.js`)
 - `js/user.js` — simulated user: profile presets, assignments/snapshots, acceptances, seed
 - `js/app.js` — UI, routing (`#/`, `#/baru`, `#/t/:id`, `#/t/:id/edit`, `#/t/:id/v/:n`,
   `#/saya`, `#/saya/:assignmentId`)
 - `styles.css` — single teal accent, shared document styling
 - `tests/dom-harness.js` — shared jsdom setup for the UI tests
+- `tests/richtext.test.js`, `tests/ui-editor.js` — JSON format and visual editor tests
 
 ## Out of scope
 

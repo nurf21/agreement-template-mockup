@@ -3,6 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const S = require('../js/store.js');
 const U = require('../js/user.js');
+const RT = require('../js/richtext.js');
 
 const T1 = '2026-11-05T02:00:00Z';
 const T2 = '2026-11-05T03:00:00Z';
@@ -145,13 +146,18 @@ test('archiving blocks new assignments but existing snapshots stay readable and 
 
 test('placeholder values stay plain text in the snapshot', () => {
   const tpl = { nextId: 1, templates: [] };
-  const t = S.saveDraft(tpl, { templateId: null, code: S.generateCode(tpl), internalName: 'N', title: 'J', content: 'Halo {{nama_lengkap}}' }, 'A', T1);
+  const content = RT.wrap({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Halo ', marks: [{ type: 'bold' }] }, { type: 'variable', attrs: { key: 'nama_lengkap' }, marks: [{ type: 'bold' }] }] }] });
+  const t = S.saveDraft(tpl, { templateId: null, code: S.generateCode(tpl), internalName: 'N', title: 'J', content }, 'A', T1);
   S.publishDraft(tpl, t.id, t.lockVersion, 'A', T1);
   const user = U.emptyUserState();
   user.profile = Object.freeze({ userId: U.SIM_USER_ID, preset: 'x', values: { nama_lengkap: '<img src=x onerror=alert(1)> **b**' } });
   const a = U.assignVersion(user, tpl, t.id, 1, T1);
-  assert.doesNotMatch(a.snapshot.html, /<img|<strong>/);
-  assert.match(a.snapshot.html, /&lt;img src=x onerror=alert\(1\)&gt; \*\*b\*\*/);
+  assert.doesNotMatch(a.snapshot.html, /<img|<strong>\*|<b>/);
+  assert.match(a.snapshot.html, /<strong><span class="ph-value"[^>]*>&lt;img src=x onerror=alert\(1\)&gt; \*\*b\*\*<\/span><\/strong>/);
+  // Legacy Markdown path keeps the same guarantee.
+  const legacy = U.assignVersion(user, S.createSeedState(), 'tpl_2', 1, T1);
+  assert.match(legacy.snapshot.html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(legacy.snapshot.html, /<img/);
 });
 
 test('whitespace-only value counts as missing', () => {
@@ -168,4 +174,77 @@ test('another user\'s assignment is not visible or acceptable', () => {
   assert.equal(U.getAssignment(user, 'asg_other'), null);
   assert.throws(() => U.acceptAssignment(user, 'asg_other', T1), { code: 'NOT_FOUND' });
   assert.equal(U.listForUser(user).length, 4);
+});
+
+/* ---------- Rich-text (JSON) versions and legacy compatibility ---------- */
+
+/** Convert tpl_2's Markdown v1 explicitly and publish it as JSON Versi 2. */
+function publishJsonVersion(tpl) {
+  const t = S.getTemplate(tpl, 'tpl_2');
+  S.convertLegacyDraft(tpl, t.id, t.lockVersion, 'Admin', T1);
+  return S.publishDraft(tpl, t.id, t.lockVersion, 'Admin', T1);
+}
+
+test('a JSON version assignment freezes title, version, format, JSON content, values, and rendered output', () => {
+  const { tpl, user } = seed();
+  const v2 = publishJsonVersion(tpl);
+  assert.equal(v2.format, 'richtext-json');
+  const a = U.assignVersion(user, tpl, 'tpl_2', 2, T2);
+  const s = a.snapshot;
+  assert.equal(s.format, 'richtext-json');
+  assert.equal(s.formatVersion, 1);
+  assert.equal(s.templateVersion, 2);
+  assert.equal(s.title, 'Ketentuan Program Rujukan');
+  assert.deepEqual(s.content, v2.content);
+  assert.notEqual(s.content, v2.content, 'detached copy');
+  assert.deepEqual({ ...s.values }, { nama_lengkap: 'Dewi Lestari' });
+  assert.equal(s.html, RT.renderDocument(v2.content, { nama_lengkap: 'Dewi Lestari' }), 'same renderer as the admin preview');
+  assert.match(s.html, /rujukan, <span class="ph-value"[^>]*>Dewi Lestari<\/span>\./);
+  assert.ok(Object.isFrozen(s) && Object.isFrozen(s.content.document.content[0]));
+});
+
+test('JSON snapshots and acceptances stay unchanged after edits, publications, profile changes, and archival', () => {
+  const { tpl, user } = seed();
+  publishJsonVersion(tpl);
+  const a = U.assignVersion(user, tpl, 'tpl_2', 2, T2);
+  const acc = U.acceptAssignment(user, a.id, T2).acceptance;
+  const before = JSON.stringify(user);
+  const t = S.getTemplate(tpl, 'tpl_2');
+  const edited = RT.wrap({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Isi baru' }] }] });
+  S.saveDraft(tpl, { templateId: t.id, internalName: t.internalName, title: 'Judul baru', content: edited, lockVersion: t.lockVersion }, 'Admin', T2);
+  S.publishDraft(tpl, t.id, t.lockVersion, 'Admin', T2);
+  U.setProfile(user, 'diperbarui');
+  S.archiveTemplate(tpl, t.id, t.lockVersion, 'Admin', T2);
+  U.setProfile(user, 'awal');
+  assert.equal(JSON.stringify(user), before);
+  assert.equal(U.acceptAssignment(user, a.id, '2027-01-01T00:00:00Z').acceptance, acc, 'repeat keeps the original record');
+  assert.equal(acc.acceptedAt, T2);
+});
+
+test('legacy Markdown snapshots, including accepted ones, are unchanged by explicit conversion', () => {
+  const { tpl, user } = seed();
+  const accepted = find(user, 'tpl_1', 1);
+  const pendingV1 = find(user, 'tpl_2', 1).assignment.snapshot;
+  const before = JSON.stringify(user);
+  publishJsonVersion(tpl); // converts and republishes tpl_2
+  assert.equal(JSON.stringify(user), before);
+  assert.equal(pendingV1.format, undefined, 'legacy snapshot keeps its original shape');
+  assert.equal(typeof pendingV1.content, 'string');
+  assert.equal(pendingV1.html, require('../js/markdown.js').renderMarkdown(pendingV1.content, pendingV1.values));
+  assert.equal(accepted.acceptance.acceptedAt, '2026-09-15T03:20:00Z');
+  // Assigning the still-published Markdown v1 of another template keeps the legacy renderer.
+  const legacy = U.assignVersion(user, tpl, 'tpl_4', 3, T2);
+  assert.equal(legacy.snapshot.format, undefined);
+  assert.match(legacy.snapshot.html, /<table>/);
+});
+
+test('JSON snapshot with missing placeholder data is unavailable and cannot be accepted', () => {
+  const { tpl, user } = seed();
+  publishJsonVersion(tpl);
+  U.setProfile(user, 'kosong');
+  const a = U.assignVersion(user, tpl, 'tpl_2', 2, T2);
+  assert.deepEqual([...a.snapshot.missing], ['nama_lengkap']);
+  assert.equal(a.snapshot.html, null);
+  assert.throws(() => U.acceptAssignment(user, a.id, T2), { code: 'UNAVAILABLE' });
+  assert.equal(user.acceptances.length, 1);
 });

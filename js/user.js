@@ -16,6 +16,7 @@
 
   const node = typeof module === 'object' && module.exports;
   const MD = node ? require('./markdown.js') : root.AgreementMarkdown;
+  const RT = node ? require('./richtext.js') : root.AgreementRichText;
   const S = node ? require('./store.js') : root.AgreementStore;
   const { StoreError } = S;
 
@@ -41,14 +42,20 @@
    * Freeze one published version for one user. Every placeholder in the
    * content is required: a missing or blank value is recorded in `missing`
    * and no HTML is rendered, so nothing is ever substituted with "".
+   *
+   * Legacy Markdown versions keep the original snapshot shape and renderer.
+   * Rich-text versions also pin the format, format version, and JSON content,
+   * and are rendered by the same validated path as the admin preview.
    */
   function buildSnapshot(id, t, v, profile, now) {
+    const json = S.formatOf(v) === RT.FORMAT;
     const values = {};
     const missing = [];
-    placeholdersIn(v.content).forEach((key) => {
+    (json ? RT.placeholderKeys(v.content) : placeholdersIn(v.content)).forEach((key) => {
       if (hasValue(profile.values[key])) values[key] = profile.values[key];
       else missing.push(key);
     });
+    const render = json ? RT.renderDocument : MD.renderMarkdown;
     return Object.freeze({
       id,
       userId: profile.userId,
@@ -56,10 +63,10 @@
       templateCode: t.code,
       templateVersion: v.number,
       title: v.title,
-      content: v.content,
+      ...(json ? { format: RT.FORMAT, formatVersion: v.content.formatVersion, content: RT.freezeCopy(v.content) } : { content: v.content }),
       values: Object.freeze(values),
       missing: Object.freeze(missing),
-      html: missing.length ? null : MD.renderMarkdown(v.content, values),
+      html: missing.length ? null : render(v.content, values),
       createdAt: now,
     });
   }

@@ -2,6 +2,10 @@
  * In-memory template store. Lifecycle: draft -> published -> archived.
  * - At most one draft per template; saving a draft bumps its revision only.
  * - Publishing freezes the draft's title and content as the next version.
+ * - Content format: every record carries `format`. New drafts and versions are
+ *   always 'richtext-json' (validated JSON envelope, deep-frozen). Legacy
+ *   records without `format` are Markdown; they are never converted
+ *   automatically, only by the explicit convertLegacyDraft action.
  * - Archiving blocks new edits/publications but keeps drafts, versions, history.
  * - Nothing is ever deleted.
  * - Every template carries a `lockVersion` that increases on each successful
@@ -12,9 +16,9 @@
 (function (root) {
   'use strict';
 
-  const MD = (typeof module === 'object' && module.exports)
-    ? require('./markdown.js')
-    : root.AgreementMarkdown;
+  const node = typeof module === 'object' && module.exports;
+  const MD = node ? require('./markdown.js') : root.AgreementMarkdown;
+  const RT = node ? require('./richtext.js') : root.AgreementRichText;
 
   class StoreError extends Error {
     constructor(code, message, details) {
@@ -83,17 +87,47 @@
     t.versions = Object.freeze(t.versions.concat(Object.freeze({ ...version })));
   }
 
+  /** Records without a format discriminator are legacy Markdown. */
+  function formatOf(record) {
+    return (record && record.format) || 'markdown';
+  }
+
+  /** Validate a draft or version with the rules of its own format. */
+  function validateRecord(internalName, record) {
+    const fields = { internalName, title: record.title, content: record.content };
+    return formatOf(record) === RT.FORMAT ? RT.validateDraft(fields) : MD.validateDraft(fields);
+  }
+
+  function writeDraft(t, prev, fields, actor, now, extra) {
+    const latest = latestVersion(t);
+    t.draft = {
+      title: fields.title,
+      format: RT.FORMAT,
+      content: RT.freezeCopy(fields.content),
+      revision: prev ? prev.revision + 1 : 1,
+      basedOnVersion: prev ? prev.basedOnVersion : (latest ? latest.number : null),
+      createdAt: prev ? prev.createdAt : now,
+      updatedAt: now,
+      updatedBy: actor,
+      ...(prev && prev.convertedFrom ? { convertedFrom: prev.convertedFrom } : {}),
+      ...extra,
+    };
+    t.updatedAt = now;
+    t.lockVersion++;
+  }
+
   /**
    * Save (create or update) the single draft. For an existing template,
    * `input.lockVersion` must equal the template's current lockVersion.
+   * Content must be a valid rich-text envelope; Markdown strings are refused.
    */
   function saveDraft(state, input, actor, now) {
     const fields = {
       internalName: String(input.internalName || '').trim(),
       title: String(input.title || '').trim(),
-      content: String(input.content || ''),
+      content: input.content,
     };
-    const errors = MD.validateDraft(fields);
+    const errors = RT.validateDraft(fields);
     if (errors.length) throw new StoreError('INVALID', 'Draf tidak valid.', { errors });
 
     let t;
@@ -121,20 +155,34 @@
       assertLock(t, input.lockVersion);
     }
 
-    const prev = t.draft;
-    const latest = latestVersion(t);
     t.internalName = fields.internalName;
-    t.draft = {
-      title: fields.title,
-      content: fields.content,
-      revision: prev ? prev.revision + 1 : 1,
-      basedOnVersion: prev ? prev.basedOnVersion : (latest ? latest.number : null),
-      createdAt: prev ? prev.createdAt : now,
-      updatedAt: now,
-      updatedBy: actor,
-    };
-    t.updatedAt = now;
-    t.lockVersion++;
+    writeDraft(t, t.draft, fields, actor, now);
+    return t;
+  }
+
+  /**
+   * Explicit, admin-initiated conversion of legacy Markdown into a new
+   * rich-text draft. Source: the Markdown draft if there is one, otherwise the
+   * latest published version (which stays unchanged). Nothing is saved unless
+   * the whole document converts faithfully.
+   */
+  function convertLegacyDraft(state, id, expectedLockVersion, actor, now) {
+    const t = requireTemplate(state, id);
+    if (t.archived) throw new StoreError('ARCHIVED', 'Template diarsipkan dan tidak dapat diedit.');
+    assertLock(t, expectedLockVersion);
+    const latest = latestVersion(t);
+    const source = t.draft || latest;
+    if (!source || formatOf(source) !== 'markdown') {
+      throw new StoreError('NOT_LEGACY', 'Tidak ada dokumen Markdown lama untuk dikonversi.');
+    }
+    const res = RT.convertMarkdown(source.content);
+    if (!res.ok) {
+      throw new StoreError('CONVERSION_FAILED', 'Dokumen tidak dapat dikonversi tanpa mengubah isinya.', { errors: res.errors });
+    }
+    const convertedFrom = t.draft
+      ? { format: 'markdown', draftRevision: t.draft.revision }
+      : { format: 'markdown', version: latest.number };
+    writeDraft(t, t.draft, { title: source.title, content: res.content }, actor, now, { convertedFrom });
     return t;
   }
 
@@ -143,15 +191,17 @@
     if (t.archived) throw new StoreError('ARCHIVED', 'Template diarsipkan dan tidak dapat diterbitkan.');
     assertLock(t, expectedLockVersion);
     if (!t.draft) throw new StoreError('NO_DRAFT', 'Tidak ada draf untuk diterbitkan.');
-    const errors = MD.validateDraft(
-      { internalName: t.internalName, title: t.draft.title, content: t.draft.content }
-    );
+    if (formatOf(t.draft) !== RT.FORMAT) {
+      throw new StoreError('LEGACY_FORMAT', 'Draf Markdown lama harus dikonversi ke editor visual sebelum diterbitkan.');
+    }
+    const errors = validateRecord(t.internalName, t.draft);
     if (errors.length) throw new StoreError('INVALID', 'Draf belum dapat diterbitkan.', { errors });
 
     const version = {
       number: t.versions.length + 1,
       title: t.draft.title,
-      content: t.draft.content,
+      format: RT.FORMAT,
+      content: RT.freezeCopy(t.draft.content),
       publishedAt: now,
       publishedBy: actor,
       fromRevision: t.draft.revision,
@@ -180,20 +230,17 @@
   function simulateExternalEdit(state, id, actor, now) {
     const t = requireTemplate(state, id);
     if (t.archived) throw new StoreError('ARCHIVED', 'Template diarsipkan.');
-    const latest = latestVersion(t);
-    const base = t.draft || latest || { title: '', content: '' };
-    const note = '\n\nParagraf ini ditambahkan oleh admin lain (simulasi).';
-    t.draft = {
-      title: base.title,
-      content: base.content + note,
-      revision: t.draft ? t.draft.revision + 1 : 1,
-      basedOnVersion: t.draft ? t.draft.basedOnVersion : (latest ? latest.number : null),
-      createdAt: t.draft ? t.draft.createdAt : now,
-      updatedAt: now,
-      updatedBy: actor,
-    };
-    t.updatedAt = now;
-    t.lockVersion++;
+    const base = t.draft || latestVersion(t);
+    if (!base) throw new StoreError('NO_DRAFT', 'Tidak ada dokumen.');
+    let content = base.content;
+    if (formatOf(base) === 'markdown') {
+      const res = RT.convertMarkdown(content);
+      if (!res.ok) throw new StoreError('CONVERSION_FAILED', res.errors[0]);
+      content = res.content;
+    }
+    const note = { type: 'paragraph', content: [{ type: 'text', text: 'Paragraf ini ditambahkan oleh admin lain (simulasi).' }] };
+    const next = RT.wrap({ type: 'doc', content: content.document.content.concat(note) });
+    writeDraft(t, t.draft, { title: base.title, content: next }, actor, now);
     return t;
   }
 
@@ -269,6 +316,14 @@
     ].join('\n'),
   };
 
+  /** Seed drafts are rich-text JSON, built from legacy text by the converter. */
+  function seedJson(markdown, extraBlocks) {
+    const res = RT.convertMarkdown(markdown);
+    if (!res.ok) throw new Error('Seed conversion failed: ' + res.errors.join('; '));
+    const doc = { type: 'doc', content: res.content.document.content.concat(extraBlocks || []) };
+    return RT.freezeCopy(RT.wrap(doc));
+  }
+
   function createSeedState() {
     const state = { nextId: 1, templates: [] };
     const add = (t) => {
@@ -291,9 +346,12 @@
         { number: 1, title: 'Persetujuan Layanan', content: CONTENT.layanan1, publishedAt: '2026-09-10T02:00:00Z', publishedBy: 'Rahmat Hidayat', fromRevision: 4 },
         { number: 2, title: 'Persetujuan Layanan Umum', content: CONTENT.layanan2, publishedAt: '2026-10-21T08:30:00Z', publishedBy: 'Siti Rahayu', fromRevision: 2 },
       ],
+      // Draft created with "Buat draf editor visual" from the Markdown Versi 2.
       draft: {
         title: 'Persetujuan Layanan Umum',
-        content: CONTENT.layanan2 + '\n- Hubungi tim dukungan bila ada pertanyaan.',
+        format: RT.FORMAT,
+        content: seedJson(CONTENT.layanan2 + '\n- Hubungi tim dukungan bila ada pertanyaan.'),
+        convertedFrom: { format: 'markdown', version: 2 },
         revision: 3, basedOnVersion: 2,
         createdAt: '2026-11-01T04:00:00Z', updatedAt: '2026-11-04T07:42:00Z', updatedBy: 'Siti Rahayu',
       },
@@ -313,7 +371,12 @@
       createdAt: '2026-10-28T02:20:00Z', createdBy: 'Rahmat Hidayat',
       updatedAt: '2026-11-03T03:05:00Z',
       draft: {
-        title: 'Persetujuan Komunikasi', content: CONTENT.pemasaran,
+        title: 'Persetujuan Komunikasi',
+        format: RT.FORMAT,
+        content: seedJson(CONTENT.pemasaran, [{
+          type: 'paragraph', attrs: { textAlign: 'center' },
+          content: [{ type: 'text', text: 'Contoh netral — bukan ketentuan resmi.', marks: [{ type: 'italic' }, { type: 'underline' }] }],
+        }]),
         revision: 2, basedOnVersion: null,
         createdAt: '2026-10-28T02:20:00Z', updatedAt: '2026-11-03T03:05:00Z', updatedBy: 'Rahmat Hidayat',
       },
@@ -348,8 +411,8 @@
   }
 
   const api = {
-    StoreError, generateCode, statusOf, latestVersion, getTemplate, assertLock,
-    saveDraft, publishDraft, archiveTemplate, simulateExternalEdit, createSeedState,
+    StoreError, generateCode, statusOf, latestVersion, getTemplate, assertLock, formatOf, validateRecord,
+    saveDraft, convertLegacyDraft, publishDraft, archiveTemplate, simulateExternalEdit, createSeedState,
   };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.AgreementStore = api;

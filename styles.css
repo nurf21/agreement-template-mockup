@@ -276,7 +276,7 @@ code { font-family: var(--font-mono); font-size: .9em; }
 }
 
 /* Editor */
-.editor-form { display: grid; gap: 16px; }
+.editor-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
 .field-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 300px); gap: 16px; }
 .field label, .label-row label { display: block; font-weight: 600; margin-bottom: 6px; }
 .req { font-weight: 500; font-size: 12.5px; color: var(--text-3); margin-left: 4px; }
@@ -291,17 +291,61 @@ code { font-family: var(--font-mono); font-size: .9em; }
 .editor-grid.with-preview { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .label-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .char-count { font-size: 12.5px; color: var(--text-3); }
-.md-toolbar {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px;
-  background: var(--surface-2); border: 1px solid var(--border-strong); border-bottom: 0;
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+.field-label { display: block; font-weight: 600; margin-bottom: 6px; }
+.char-count.is-over { color: var(--danger); font-weight: 600; }
+
+/* Visual editor (Tiptap): grouped toolbar above a document-styled editing area */
+.rte { border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); }
+.rte:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.rte-toolbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0; padding: 6px;
+  background: var(--surface-2); border-bottom: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0; position: sticky; top: 0; z-index: 5;
 }
+.tool-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 0 6px; border-right: 1px solid var(--border-strong); }
+.tool-group:last-child { border-right: 0; }
 .tool {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
   border: 1px solid transparent; background: transparent; font: inherit; font-size: 13.5px; color: var(--text);
-  min-height: 32px; min-width: 34px; padding: 4px 9px; border-radius: 4px; cursor: pointer;
+  min-height: 34px; min-width: 34px; padding: 4px 8px; border-radius: 4px; cursor: pointer; white-space: nowrap;
 }
 .tool:hover { background: var(--surface); border-color: var(--border); }
+.tool:focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; position: relative; z-index: 1; }
+.tool[aria-pressed="true"] { background: var(--accent-soft); border-color: #8cc2c7; color: var(--accent-text); }
+.tool[aria-disabled="true"] { color: var(--text-3); opacity: .55; cursor: not-allowed; background: transparent; border-color: transparent; }
 .tool-ph { color: var(--accent-text); font-weight: 600; }
+.rte-holder { min-width: 0; }
+.rte-content {
+  min-height: 460px; padding: 18px 22px; outline: none; overflow-wrap: anywhere;
+  font-family: var(--font-doc); font-size: 17px; line-height: 1.7; color: #1c1f22;
+}
+.rte-content[aria-invalid="true"] { box-shadow: inset 3px 0 0 var(--danger); }
+.rte-content > :first-child { margin-top: 0; }
+.rte-content p { margin: 0 0 .8em; }
+.rte-content h2 { font-size: 21px; margin: 1.4em 0 .5em; }
+.rte-content h3 { font-size: 18px; margin: 1.2em 0 .4em; }
+.rte-content ul, .rte-content ol { margin: 0 0 1em; padding-left: 1.5em; }
+.rte-content li > p { margin: 0 0 .3em; }
+.rte-content table { border-collapse: collapse; width: 100%; margin: 0 0 1.2em; font-size: 15.5px; line-height: 1.5; table-layout: fixed; }
+.rte-content th, .rte-content td { border: 1px solid var(--border-strong); padding: 6px 10px; vertical-align: top; position: relative; }
+.rte-content th { background: var(--surface-2); font-weight: 650; text-align: left; }
+.rte-content th > p, .rte-content td > p { margin: 0; }
+.rte-content .selectedCell::after { content: ""; position: absolute; inset: 0; background: rgba(14, 102, 114, .14); pointer-events: none; }
+.rte-content .tableWrapper { overflow-x: auto; }
+.rte-content p.is-editor-empty:first-child::before { content: none; }
+.ph-chip {
+  display: inline-block; font-family: var(--font-ui); font-size: .78em; font-weight: 600; line-height: 1.5;
+  background: var(--accent-soft); color: var(--accent-text); border: 1px solid #8cc2c7; border-radius: 999px;
+  padding: 0 8px; margin: 0 1px; vertical-align: baseline; white-space: nowrap; user-select: all;
+}
+.rte-content .ph-chip.ProseMirror-selectednode { outline: 2px solid var(--accent); outline-offset: 1px; }
+.align-center { text-align: center; }
+.align-right { text-align: right; }
+.doc-body li > p { margin: 0 0 .3em; }
+.doc-body th > p, .doc-body td > p { margin: 0; }
+.doc-body th[scope="row"] { background: var(--surface-2); }
+kbd { font-family: var(--font-mono); font-size: .85em; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; background: var(--surface); }
+.convert-panel h2 { font-size: 17px; margin-bottom: 6px; }
 .tool-sep { width: 1px; height: 20px; background: var(--border-strong); margin: 0 4px; }
 .md-input {
   display: block; min-height: 520px; resize: vertical; border-radius: 0 0 var(--radius-sm) var(--radius-sm);
@@ -344,6 +388,7 @@ code { font-family: var(--font-mono); font-size: .9em; }
   background: rgba(255, 255, 255, .96); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 10px 14px; box-shadow: 0 -4px 16px rgba(16, 24, 32, .06);
 }
+.action-bar .btn { max-width: 100%; white-space: normal; text-align: center; }
 .btn[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-text); }
 .action-hint { font-size: 13px; color: var(--text-3); }
 .spacer { flex: 1; }
@@ -452,6 +497,7 @@ code { font-family: var(--font-mono); font-size: .9em; }
   .editor-grid.with-preview { grid-template-columns: minmax(0, 1fr); }
   .preview-col { position: static; max-height: none; overflow: visible; }
   .md-input { min-height: 380px; }
+  .rte-content { min-height: 340px; }
 }
 @media (max-width: 720px) {
   .appbar-inner, .simbar-inner { padding-left: 16px; padding-right: 16px; }
@@ -465,6 +511,9 @@ code { font-family: var(--font-mono); font-size: .9em; }
   .doc-title { font-size: 23px; }
   .search { max-width: none; }
   .ph-menu { width: min(320px, calc(100vw - 48px)); }
+  .tool-group { padding: 0 4px; }
+  .tool { min-height: 40px; min-width: 40px; }
+  .rte-content { padding: 14px 14px; font-size: 16px; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; }
