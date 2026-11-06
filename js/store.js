@@ -328,7 +328,8 @@
   }
 
   /*
-   * Editable sample draft for the label–value table preset. Every company
+   * Editable sample draft for the label–value table preset and consent
+   * clauses (one required, one optional). Every company
    * detail and name is fictional static text (no placeholders, no lookups).
    */
   function profileSampleJson() {
@@ -343,6 +344,11 @@
       ],
     });
     const kv = (...rows) => ({ type: 'table', attrs: { preset: 'labelValue', labelWidth: 25 }, content: rows });
+    // Consent clauses: fixed sample IDs; answers are always “Tidak” / “Ya”.
+    const clause = (clauseId, required, title, ...body) => ({
+      type: 'consentClause', attrs: { clauseId, required },
+      content: [{ type: 'clauseTitle', content: [text(title)] }, { type: 'clauseBody', content: body.map((x) => para(x)) }],
+    });
     return RT.freezeCopy(RT.wrap({
       type: 'doc',
       content: [
@@ -367,6 +373,10 @@
           row('Direktur', 'Sari Contoh'),
           row('Komisaris', 'Rudi Contoh'),
         ),
+        clause('cl_bacaprofil', true, 'Pernyataan telah membaca profil perusahaan',
+          'Dengan memilih “Ya”, saya menyatakan telah membaca dan memahami profil perusahaan di atas, termasuk susunan pengurus perusahaan. (Contoh fiktif.)'),
+        clause('cl_infolanjut', false, 'Kesediaan menerima informasi lanjutan',
+          'Pilihan ini opsional dan tidak memengaruhi persetujuan dokumen. (Contoh fiktif.)'),
       ],
     }));
   }

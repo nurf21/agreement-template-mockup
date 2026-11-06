@@ -4,12 +4,17 @@
  * The JSON envelope is the authoritative stored content:
  *   { format: 'richtext-json', formatVersion: 1 | 2, document: { type: 'doc', content: [...] } }
  *
- * Format versions (both stay readable; nothing is upgraded automatically):
+ * Format versions (all stay readable; nothing is upgraded automatically):
  * - 1: paragraphs, headings, lists, ordinary tables, placeholders.
  * - 2: adds the table preset “labelValue” (`table.attrs.preset`, with an
- *   allowlisted `labelWidth` of 20, 25, or 30 percent). `wrap()` picks the
- *   lowest version that can express a document, so documents without a
- *   preset keep version 1.
+ *   allowlisted `labelWidth` of 20, 25, or 30 percent).
+ * - 3: adds the top-level block “consentClause” (Klausul persetujuan):
+ *   `attrs: { clauseId, required }`, content exactly
+ *   [clauseTitle (plain text), clauseBody (paragraphs/lists)]. Answer options
+ *   are fixed by the system (CLAUSE_ANSWERS) and never stored in documents.
+ *   Clause IDs are unique within a document.
+ * `wrap()` picks the lowest version that can express a document, so older
+ * documents keep their version.
  * RENDER_VERSION names the HTML layout rules; it is recorded on published
  * versions and user snapshots created with these rules.
  *
@@ -28,15 +33,23 @@
     : root.AgreementMarkdown;
 
   const FORMAT = 'richtext-json';
-  const FORMAT_VERSION = 2; // latest supported
-  const FORMAT_VERSIONS = [1, 2];
-  const RENDER_VERSION = 2;
+  const FORMAT_VERSION = 3; // latest supported
+  const FORMAT_VERSIONS = [1, 2, 3];
+  // 3: adds the consent-clause fieldset; rules for older nodes are unchanged.
+  const RENDER_VERSION = 3;
   // Table presets: identifier -> allowed left-column widths (percent).
   // Visual styles are derived from these values; no style strings are stored.
   const TABLE_PRESETS = Object.freeze({
     labelValue: Object.freeze({ widths: Object.freeze([20, 25, 30]), defaultWidth: 25, since: 2 }),
   });
   const LABEL_VALUE = 'labelValue';
+  const CLAUSE_SINCE = 3;
+  const CLAUSE_ID_RE = /^cl_[a-z0-9]{10}$/;
+  // Fixed answer options, in display order. Not configurable per document.
+  const CLAUSE_ANSWERS = Object.freeze([
+    Object.freeze({ value: 'tidak', label: 'Tidak' }),
+    Object.freeze({ value: 'ya', label: 'Ya' }),
+  ]);
   const KNOWN = new Map(MD.PLACEHOLDERS.map((p) => [p.key, p]));
 
   // Size limit: length of JSON.stringify(envelope.document), in UTF-16 code
@@ -46,7 +59,9 @@
 
   const ALIGN = (v) => v === null || v === 'left' || v === 'center' || v === 'right';
   const ONE = (v) => v === 1;
-  const BLOCKS = ['paragraph', 'heading', 'bulletList', 'orderedList', 'table'];
+  // consentClause is allowed only directly in the document, so clauses can
+  // never be nested (in other clauses, lists, or table cells).
+  const BLOCKS = ['paragraph', 'heading', 'bulletList', 'orderedList', 'table', 'consentClause'];
   const INLINE = ['text', 'variable'];
   const CELL_CONTENT = ['paragraph', 'bulletList', 'orderedList'];
   const CELL = {
@@ -75,6 +90,13 @@
     tableRow: { content: ['tableCell', 'tableHeader'], min: 1 },
     tableCell: CELL,
     tableHeader: CELL,
+    consentClause: {
+      content: ['clauseTitle', 'clauseBody'], min: 2,
+      attrs: { clauseId: (v) => typeof v === 'string' && CLAUSE_ID_RE.test(v), required: (v) => typeof v === 'boolean' },
+      required: ['clauseId', 'required'],
+    },
+    clauseTitle: { content: ['text'] },
+    clauseBody: { content: CELL_CONTENT, min: 1 },
     text: { leaf: true },
     variable: { leaf: true, attrs: { key: (v) => KNOWN.has(v) }, required: ['key'] },
   };
@@ -85,6 +107,7 @@
     paragraph: 'paragraf', heading: 'judul', bulletList: 'daftar berpoin', orderedList: 'daftar bernomor',
     listItem: 'butir daftar', table: 'tabel', tableRow: 'baris tabel', tableCell: 'sel tabel',
     tableHeader: 'sel header', text: 'teks', variable: 'placeholder',
+    consentClause: 'klausul persetujuan', clauseTitle: 'judul klausul', clauseBody: 'penjelasan klausul',
   };
   const nameOf = (type) => NAMES[type] || `“${String(type).slice(0, 40)}”`;
   const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -102,7 +125,10 @@
   /** Lowest format version able to express the document. */
   function requiredVersion(document) {
     let v = 1;
-    walk(document, (n) => { if (n.type === 'table' && presetOf(n) !== null) v = Math.max(v, 2); });
+    walk(document, (n) => {
+      if (n.type === 'table' && presetOf(n) !== null) v = Math.max(v, 2);
+      if (n.type === 'consentClause') v = Math.max(v, CLAUSE_SINCE);
+    });
     return v;
   }
 
@@ -151,6 +177,22 @@
       });
     };
 
+    // Rules for consent clauses (attribute values are checked separately).
+    const clauseIds = new Set();
+    const clauseIssues = (node, kids, where) => {
+      if (envelope.formatVersion < CLAUSE_SINCE) add(where, `Klausul persetujuan memerlukan format versi ${CLAUSE_SINCE}.`);
+      if (kids.length !== 2 || !isObj(kids[0]) || kids[0].type !== 'clauseTitle' || !isObj(kids[1]) || kids[1].type !== 'clauseBody') {
+        add(where, 'Klausul persetujuan harus berisi tepat satu judul diikuti satu penjelasan.');
+      }
+      const id = isObj(node.attrs) ? node.attrs.clauseId : undefined;
+      if (typeof id === 'string' && CLAUSE_ID_RE.test(id)) {
+        if (clauseIds.has(id)) add(where, `ID klausul “${id}” dipakai lebih dari sekali dalam dokumen.`);
+        clauseIds.add(id);
+      }
+      const title = isObj(kids[0]) && kids[0].type === 'clauseTitle' ? kids[0] : null;
+      if (title && !/\S/.test(inlineText(title))) add(where, 'Judul klausul persetujuan wajib diisi.');
+    };
+
     const visit = (node, parentType, where, depth) => {
       if (issues.length >= 50) return;
       if (!isObj(node) || typeof node.type !== 'string') { add(where, 'Elemen tidak valid.'); return; }
@@ -176,6 +218,8 @@
           else if (k === 'colspan' || k === 'rowspan') add(where, 'Sel tabel gabungan tidak didukung.');
           else if (k === 'preset') add(where, `Jenis tabel “${String(attrs[k]).slice(0, 40)}” tidak didukung.`);
           else if (k === 'labelWidth') add(where, 'Lebar kolom label harus 20%, 25%, atau 30%.');
+          else if (k === 'clauseId') add(where, 'ID klausul tidak valid (dibuat otomatis oleh sistem).');
+          else if (k === 'required') add(where, 'Pengaturan “Wajib dijawab Ya” harus bernilai benar atau salah.');
           else add(where, `Nilai atribut “${k}” tidak didukung pada ${nameOf(node.type)}.`);
         }
       });
@@ -192,6 +236,7 @@
             else if (seen.has(mk.type)) add(where, `Format teks “${mk.type}” ganda.`);
             else seen.add(mk.type);
           });
+          if (parentType === 'clauseTitle' && node.marks.length) add(where, 'Judul klausul hanya berupa teks biasa tanpa format.');
         }
       }
 
@@ -213,6 +258,7 @@
       if (spec.first && kids.length && isObj(kids[0]) && kids[0].type !== spec.first) {
         add(where, `${nameOf(node.type)} harus diawali paragraf.`);
       }
+      if (node.type === 'consentClause') clauseIssues(node, kids, where);
       if (node.type === 'table') {
         const widths = kids.map((r) => (isObj(r) && Array.isArray(r.content) ? r.content.length : 0));
         if (widths.some((w) => w !== widths[0])) add(where, 'Setiap baris tabel harus memiliki jumlah sel yang sama.');
@@ -225,6 +271,27 @@
     };
     visit(envelope.document, null, '', 0);
     return issues;
+  }
+
+  /** Concatenated text of a node's text descendants. */
+  function inlineText(node) {
+    let out = '';
+    walk(node, (n) => { if (n.type === 'text' && typeof n.text === 'string') out += n.text; });
+    return out;
+  }
+
+  /**
+   * Consent clauses of a document in order: { id, title, required }. The
+   * title is plain text. Used to freeze clause metadata into user snapshots.
+   */
+  function clausesOf(envelope) {
+    const doc = envelope && envelope.document;
+    if (!isObj(doc) || !Array.isArray(doc.content)) return [];
+    return doc.content.filter((n) => isObj(n) && n.type === 'consentClause').map((n) => ({
+      id: n.attrs.clauseId,
+      title: inlineText(n.content[0]).trim(),
+      required: n.attrs.required === true,
+    }));
   }
 
   function walk(node, fn) {
@@ -301,8 +368,29 @@
   const alignAttr = (attrs) => (attrs && (attrs.textAlign === 'center' || attrs.textAlign === 'right')
     ? ` class="align-${attrs.textAlign}"` : '');
 
-  function renderNode(node, values) {
-    const kids = (list) => (list || []).map((c) => renderNode(c, values)).join('');
+  /**
+   * Consent clause: a fieldset with a legend, the explanatory text, and the
+   * fixed “Tidak / Ya” radio group (unique name per clause, nothing checked).
+   * IDs derive from the validated clause ID. `opts.preview` renders a
+   * separately-prefixed, clearly labelled simulation for admin views.
+   */
+  function renderClause(node, kids, opts) {
+    const preview = Boolean(opts && opts.preview);
+    const id = node.attrs.clauseId;
+    const base = (preview ? 'pv-' : '') + 'clause-' + id;
+    const required = node.attrs.required === true;
+    const describedBy = [base + '-desc'].concat(required ? [base + '-req'] : []).concat(preview ? [base + '-sim'] : []).join(' ');
+    const options = CLAUSE_ANSWERS.map((a) => `<label class="clause-option" for="${base}-${a.value}"><input type="radio" id="${base}-${a.value}" name="${base}" value="${a.value}"> <span>${a.label}</span></label>`).join('');
+    return `<fieldset class="clause${required ? ' clause-required' : ''}" data-clause-id="${id}" data-required="${required}" aria-describedby="${describedBy}">` +
+      `<legend class="clause-title">${esc(inlineText(node.content[0]).trim())}</legend>` +
+      (preview ? `<p class="clause-sim" id="${base}-sim">Simulasi pratinjau — pilihan tidak disimpan dan tidak dicatat sebagai jawaban.</p>` : '') +
+      `<div class="clause-body" id="${base}-desc">${kids(node.content[1].content)}</div>` +
+      (required ? `<p class="clause-req" id="${base}-req">Wajib dijawab Ya</p>` : '') +
+      `<div class="clause-options">${options}</div></fieldset>`;
+  }
+
+  function renderNode(node, values, opts) {
+    const kids = (list) => (list || []).map((c) => renderNode(c, values, opts)).join('');
     switch (node.type) {
       case 'text': return withMarks(esc(node.text), node.marks);
       case 'variable': {
@@ -342,6 +430,7 @@
           (headRow ? `<thead>${row(rows[0], true)}</thead>` : '') +
           (body ? `<tbody>${body}</tbody>` : '') + '</table></div>';
       }
+      case 'consentClause': return renderClause(node, kids, opts);
       default: throw new Error('Unsupported node: ' + node.type);
     }
   }
@@ -349,15 +438,16 @@
   /**
    * Render a validated envelope to HTML. Throws if the structure is invalid.
    * `values` (optional) maps placeholder keys to plain-text values.
+   * `opts.preview` (admin views) labels consent clauses as a simulation.
    */
-  function renderDocument(envelope, values) {
+  function renderDocument(envelope, values, opts) {
     const issues = structureIssues(envelope);
     if (issues.length) {
       const err = new Error('Dokumen tidak valid: ' + issues[0].message);
       err.issues = issues;
       throw err;
     }
-    return envelope.document.content.map((n) => renderNode(n, values)).join('\n');
+    return envelope.document.content.map((n) => renderNode(n, values, opts)).join('\n');
   }
 
   /** Plain-text view (e.g. to show an admin's unsaved text after a conflict). */
@@ -369,7 +459,7 @@
       return inline(c);
     }).join('');
     const block = (n) => {
-      if (n.type === 'paragraph' || n.type === 'heading') out.push(inline(n));
+      if (n.type === 'paragraph' || n.type === 'heading' || n.type === 'clauseTitle') out.push(inline(n));
       else if (n.type === 'tableRow') out.push((n.content || []).map((c) => (c.content || []).map(inline).join(' ')).join(' | '));
       else (n.content || []).forEach(block);
     };
@@ -416,7 +506,7 @@
   }
 
   const api = {
-    FORMAT, FORMAT_VERSION, FORMAT_VERSIONS, RENDER_VERSION, TABLE_PRESETS, LIMITS, requiredVersion, isEnvelope, emptyContent, wrap, structureIssues, contentIssues,
+    FORMAT, FORMAT_VERSION, FORMAT_VERSIONS, RENDER_VERSION, TABLE_PRESETS, LIMITS, CLAUSE_ANSWERS, CLAUSE_ID_RE, clausesOf, requiredVersion, isEnvelope, emptyContent, wrap, structureIssues, contentIssues,
     hasMeaningfulContent, contentSize, placeholderKeys, validateDraft, renderDocument, plainText,
     convertMarkdown, freezeCopy,
   };
