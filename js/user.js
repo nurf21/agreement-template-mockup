@@ -10,6 +10,12 @@
  *   Drafts are never assigned. Existing snapshots stay readable after archival.
  * - Acceptance is bound to the user and the snapshot. Accepting twice returns
  *   the original record; it is never duplicated or re-timestamped.
+ * - Consent clauses (rich-text format 3) are frozen into the snapshot as
+ *   `clauses` (ID, title, required, in document order). An acceptance of a
+ *   snapshot with clauses records `answers` keyed by clause ID ('ya',
+ *   'tidak', or null for an unanswered optional clause). A required clause
+ *   must be answered 'ya'. Snapshots without clauses, and acceptances made
+ *   before clauses existed, have neither field; nothing is invented for them.
  */
 (function (root) {
   'use strict';
@@ -66,6 +72,7 @@
       // renderVersion: the HTML layout rules used for `html` below (rich text only).
       ...(json ? {
         format: RT.FORMAT, formatVersion: v.content.formatVersion, renderVersion: RT.RENDER_VERSION, content: RT.freezeCopy(v.content),
+        clauses: RT.freezeCopy(RT.clausesOf(v.content)),
       } : { content: v.content }),
       values: Object.freeze(values),
       missing: Object.freeze(missing),
@@ -129,13 +136,51 @@
     return ownAssignments(state).map((a) => ({ assignment: a, acceptance: acceptanceFor(state, a) }));
   }
 
+  const ANSWER_VALUES = RT.CLAUSE_ANSWERS.map((x) => x.value);
+  const clausesOfSnapshot = (s) => s.clauses || [];
+
+  /**
+   * Answers for every clause of the snapshot, in clause order, with `null`
+   * for unanswered ones. Unknown clause IDs or values are refused.
+   */
+  function normalizeAnswers(snapshot, answers) {
+    const given = answers == null ? {} : answers;
+    if (typeof given !== 'object' || Array.isArray(given)) throw new StoreError('INVALID', 'Jawaban klausul tidak valid.');
+    const clauses = clausesOfSnapshot(snapshot);
+    const unknown = Object.keys(given).filter((k) => !clauses.some((c) => c.id === k));
+    if (unknown.length) throw new StoreError('INVALID', 'Jawaban untuk klausul yang tidak ada di dokumen ini.', { clauseIds: unknown });
+    const out = {};
+    clauses.forEach((c) => {
+      const v = given[c.id] == null ? null : given[c.id];
+      if (v !== null && !ANSWER_VALUES.includes(v)) throw new StoreError('INVALID', `Jawaban klausul “${c.title}” tidak valid.`);
+      out[c.id] = v;
+    });
+    return out;
+  }
+
+  /** Required clauses not answered “Ya”, each with a message naming the clause. */
+  function clauseIssues(snapshot, answers) {
+    const given = answers || {};
+    return clausesOfSnapshot(snapshot).filter((c) => c.required && given[c.id] !== 'ya').map((c) => {
+      const answer = given[c.id] == null ? null : given[c.id];
+      return {
+        clauseId: c.id, title: c.title, answer,
+        message: `Klausul “${c.title}” wajib dijawab “Ya” (${answer === 'tidak' ? 'jawaban saat ini: Tidak' : 'belum dijawab'}).`,
+      };
+    });
+  }
+
   /**
    * Record acceptance of one assignment's snapshot by the simulated user.
    * Re-checks state every time: an existing acceptance is returned unchanged
    * (`created: false`), so repeated or stale confirmations never duplicate it
-   * or replace its timestamp.
+   * or replace its timestamp or answers.
+   *
+   * `review` = { snapshotId, answers }: the snapshot and clause answers the
+   * user confirmed. A different snapshot ID is refused (STALE). For snapshots
+   * with clauses, every required clause must be answered 'ya'.
    */
-  function acceptAssignment(state, assignmentId, now) {
+  function acceptAssignment(state, assignmentId, now, review) {
     const a = getAssignment(state, assignmentId);
     if (!a) throw new StoreError('NOT_FOUND', 'Perjanjian tidak ditemukan.');
     const existing = acceptanceFor(state, a);
@@ -144,6 +189,15 @@
       throw new StoreError('UNAVAILABLE', 'Dokumen tidak tersedia karena data profil belum lengkap.');
     }
     const s = a.snapshot;
+    if (review && review.snapshotId != null && review.snapshotId !== s.id) {
+      throw new StoreError('STALE', 'Konfirmasi tidak cocok dengan dokumen ini. Tinjau ulang dokumen.');
+    }
+    let answers = null;
+    if (clausesOfSnapshot(s).length) {
+      answers = normalizeAnswers(s, review && review.answers);
+      const issues = clauseIssues(s, answers);
+      if (issues.length) throw new StoreError('CLAUSE_REQUIRED', issues[0].message, { issues });
+    }
     const acceptance = Object.freeze({
       id: 'acc_' + state.nextId++,
       snapshotId: s.id,
@@ -151,6 +205,7 @@
       templateVersion: s.templateVersion,
       userId: state.profile.userId,
       acceptedAt: now,
+      ...(answers ? { answers: Object.freeze(answers) } : {}),
     });
     state.acceptances.push(acceptance);
     return { acceptance, created: true };
@@ -185,7 +240,7 @@
 
   const api = {
     SIM_USER_ID, PROFILE_PRESETS, placeholdersIn, setProfile, assignVersion, getAssignment,
-    acceptanceFor, listForUser, acceptAssignment, emptyUserState, createSeedUserState,
+    acceptanceFor, listForUser, acceptAssignment, emptyUserState, createSeedUserState, normalizeAnswers, clauseIssues,
   };
   if (node) module.exports = api;
   else root.AgreementUser = api;

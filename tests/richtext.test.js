@@ -15,7 +15,7 @@ const messages = (env) => RT.contentIssues(env).map((i) => i.message);
 test('envelope: format discriminator and version are required', () => {
   assert.deepEqual(messages(docOf(p(txt('a')))), []);
   assert.match(messages({ format: 'html', formatVersion: 1, document: { type: 'doc', content: [p(txt('a'))] } })[0], /Format isi tidak didukung/);
-  assert.match(messages({ ...docOf(p(txt('a'))), formatVersion: 3 })[0], /Versi format/);
+  assert.match(messages({ ...docOf(p(txt('a'))), formatVersion: 4 })[0], /Versi format/);
   assert.match(messages({ ...docOf(p(txt('a'))), html: '<p>a</p>' })[0], /Properti tidak dikenal/);
   assert.match(messages('## Markdown')[0], /richtext-json/);
   assert.match(messages(null)[0], /JSON terstruktur/);

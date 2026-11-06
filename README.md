@@ -36,8 +36,8 @@ browser scripts loaded directly, so there is no other build step.
 ## Test
 
 ```bash
-npm test          # node:test: rich-text JSON, legacy Markdown, lifecycle store, user assignments/acceptance
-npm run test:ui   # builds the bundle, then jsdom: admin smoke, user flow, visual editor, label–value preset (tests/ui-*.js)
+npm test          # node:test: rich-text JSON, legacy Markdown, lifecycle store, user assignments/acceptance, consent clauses
+npm run test:ui   # builds the bundle, then jsdom: admin smoke, user flow, visual editor, label–value preset, consent clauses (tests/ui-*.js)
 ```
 
 The UI tests run Tiptap inside jsdom (DOM simulation without layout). Layout,
@@ -45,6 +45,13 @@ real keyboard input, and real paste events were additionally checked manually in
 headless Chromium; that script is not part of the repository.
 The label–value table preset has not yet been checked in a real browser
 (layout, desktop/mobile widths); only its DOM output is tested.
+Consent clauses were additionally checked in headless Chromium (driven over the
+DevTools protocol; script not in the repository): real keyboard input on the
+radios (`Space` selects, arrow keys move within one clause's group, `Tab` moves
+to the next group, `Enter` on a radio submits nothing), the consent checkbox,
+the confirmation dialog (`Enter` opens, `Esc` cancels), and a 375 px mobile
+viewport (no horizontal overflow, answer targets at least 44 px tall). No
+screen reader was used.
 
 ## Dependencies
 
@@ -141,6 +148,40 @@ notice under the user header says so on every user page.
   can still be accepted (seed: “Ketentuan Dompet”, assigned before archival);
   accepted snapshots remain available.
 
+### Consent clauses (“Klausul persetujuan”)
+
+- A snapshot whose document contains clauses shows each clause inline, at its
+  position, as a `<fieldset>` with the title as `<legend>`, the explanatory
+  text, and radios “Tidak” / “Ya” with explicit `<label for>`. Each clause has
+  its own radio group (`name="clause-<clauseId>"`); both options start
+  unselected. Required clauses show “Wajib dijawab Ya”.
+- “Setujui Perjanjian” is enabled only when the document is available, every
+  required clause is answered “Ya”, and the consent checkbox is checked. Below
+  the button, each blocking clause is named (“belum dijawab” or “jawaban saat
+  ini: Tidak”) with a link that focuses it. Optional clauses may be answered
+  either way or left unanswered.
+- Choosing an answer only changes local page state: it never submits, records,
+  or rejects anything, and “Tidak” does not remove access. Answers can be
+  changed until the final confirmation. Leaving the document discards them.
+- The confirmation dialog lists the answers to be recorded. The conditions are
+  checked again when it opens and when it is confirmed; if the answers changed
+  in between (or the page now shows another document), nothing is recorded and
+  a new confirmation is required.
+- The acceptance record additionally holds `answers`, keyed by clause ID
+  (`"ya"`, `"tidak"`, or `null` for an unanswered optional clause), bound to
+  the record's user and snapshot. Afterwards the page lists the recorded
+  answers next to the original timestamp, and the clauses show them read-only
+  (disabled). A repeated confirmation returns the original record and answers.
+- Snapshots freeze `clauses` (ID, title, required flag, in document order)
+  together with the full JSON content. Later template edits or publications
+  never change them. Documents without clauses, legacy snapshots, and earlier
+  acceptances are unchanged: no `answers` are invented and nothing has to be
+  accepted again.
+- Try it: in the admin console publish “Contoh Profil Perusahaan (fiktif)”,
+  then in *Kontrol simulasi* assign it. Its sample clauses are “Pernyataan
+  telah membaca profil perusahaan” (required) and “Kesediaan menerima
+  informasi lanjutan” (optional), both fictional.
+
 ### Seed data
 
 | Template | Version | State |
@@ -189,6 +230,7 @@ only contains the supported nodes, so it cannot produce anything else.
 | Daftar | Daftar berpoin, bernomor | `Ctrl+Shift+8/7`; `Tab`/`Shift+Tab` nest |
 | Tabel | Sisipkan tabel (3×2 with header row), + / − baris, + / − kolom, Baris header, Hapus tabel | `Tab` moves between cells |
 | Tabel label–nilai | Tabel label–nilai (inserts the preset), Lebar kolom label 20% / 25% / 30% | `Tab` moves between cells |
+| Klausul persetujuan | Klausul persetujuan (inserts a clause), Wajib dijawab Ya (toggle, on by default), Hapus klausul | `Enter` in the title moves to the text |
 | Placeholder | Sisipkan placeholder (menu) | arrows, `Enter`, `Esc` |
 
 - The toolbar is one tab stop (WAI-ARIA toolbar, roving tabindex): arrow keys,
@@ -197,6 +239,16 @@ only contains the supported nodes, so it cannot produce anything else.
   never a keyboard trap. Toggle buttons expose `aria-pressed`; unavailable
   commands (e.g. row controls outside a table) are `aria-disabled`.
 - Headings and tables are not available inside lists or table cells.
+- **Klausul persetujuan** inserts a clause block at the top level: an editable
+  plain-text title, explanatory text (paragraphs, lists, bold/italic/underline,
+  placeholders), and the “Wajib dijawab Ya” setting. The answer options are
+  shown as fixed text (“Tidak”, “Ya”); admins cannot change them or set a
+  default. The clause ID is generated by the system (`cl_` + 10 characters)
+  and shown read-only. Clauses cannot be placed in clauses, lists, or table
+  cells. A pasted copy of a clause that already exists in the document gets a
+  fresh ID; missing or invalid pasted IDs are replaced. In the preview and in
+  draft/version views, clauses are labelled “Simulasi pratinjau”. Their radios
+  use separate IDs and record nothing.
 - See [Label–value table preset](#labelvalue-table-preset-tabel-labelnilai) for
   the preset's rules.
 - The toolbar wraps on narrow screens; the page never scrolls horizontally.
@@ -256,7 +308,7 @@ aligned and vertically centred text, about 18×22 px cell padding on desktop and
 minimum of about 7–8 rem so labels stay legible, and the table always fits the
 document width, so it never needs a horizontal scroll region.
 
-## Document format (`richtext-json`, versions 1 and 2)
+## Document format (`richtext-json`, versions 1, 2, and 3)
 
 New drafts and new published versions store content as a versioned JSON
 envelope; this JSON is the authoritative content (HTML is only derived output):
@@ -310,13 +362,29 @@ A `labelValue` table additionally needs exactly two cells per row, a
   ] }] }
 ```
 
-**Versions.** `formatVersion` 1 and 2 are both accepted. Version 2 only adds
-the table preset. When content is stored, the envelope gets the lowest version
-that can express it (2 only if it contains a preset), so existing v1 documents
-and documents without presets stay v1. Nothing is upgraded or restyled
+A consent clause (`formatVersion` 3) is a top-level block. Its attributes are
+exactly `clauseId` (`/^cl_[a-z0-9]{10}$/`, unique within the document) and
+`required` (boolean). Its content is exactly one `clauseTitle` (plain text, no
+marks or placeholders, must not be blank) followed by one `clauseBody`
+(paragraphs and lists). Answer options are not stored; they are always
+`tidak` / `ya` (`RT.CLAUSE_ANSWERS`). Example:
+
+```json
+{ "type": "consentClause", "attrs": { "clauseId": "cl_bacaprofil", "required": true },
+  "content": [
+    { "type": "clauseTitle", "content": [{ "type": "text", "text": "Pernyataan telah membaca profil perusahaan" }] },
+    { "type": "clauseBody", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Dengan memilih “Ya”, …" }] }] }
+  ] }
+```
+
+**Versions.** `formatVersion` 1, 2, and 3 are accepted. Version 2 adds the
+table preset; version 3 adds consent clauses. When content is stored, the
+envelope gets the lowest version that can express it, so documents without
+these blocks keep their earlier version. Nothing is upgraded or restyled
 automatically.
 
-**Layout version.** `RT.RENDER_VERSION` (currently 2) names the HTML/CSS layout
+**Layout version.** `RT.RENDER_VERSION` (currently 3; 3 adds the clause
+fieldset, older blocks render as before) names the HTML/CSS layout
 rules. It is recorded as `renderVersion` on each newly published rich-text
 version and each new rich-text user snapshot. Records created earlier carry no
 `renderVersion` and are left unchanged; the preset's styles only target the new

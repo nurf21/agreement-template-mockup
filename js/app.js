@@ -19,6 +19,9 @@
     // User side: explicit assignments with immutable snapshots (separate from templates).
     user: U.createSeedUserState(seedData),
     simOpen: false,
+    // Unconfirmed clause answers on the open user document: { assignmentId, answers }.
+    // Never an acceptance; dropped on navigation.
+    clauseDraft: null,
     perms: { read: true, edit: true, publish: true },
     list: { q: '', status: 'all', draftOnly: false },
     editor: null,
@@ -99,6 +102,7 @@
       return;
     }
     if (leaving) dropEditor();
+    app.clauseDraft = null;
     app.currentHash = location.hash;
     render({ nav: true });
   });
@@ -182,7 +186,8 @@
     let body;
     if (S.formatOf(rec) === RT.FORMAT) {
       try {
-        body = RT.hasMeaningfulContent(rec.content) ? RT.renderDocument(rec.content, values) : empty;
+        // Admin views label consent clauses as a simulation; nothing here records answers.
+        body = RT.hasMeaningfulContent(rec.content) ? RT.renderDocument(rec.content, values, { preview: true }) : empty;
       } catch (_) {
         body = '<div class="md-invalid" role="note"><p>Pratinjau tidak dapat ditampilkan karena struktur isi dokumen tidak valid. Lihat daftar masalah isi dokumen.</p></div>';
       }
@@ -590,12 +595,13 @@
                 <li>Daftar berpoin dan bernomor; <kbd>Tab</kbd>/<kbd>Shift</kbd>+<kbd>Tab</kbd> mengubah tingkat butir</li>
                 <li>Tabel dengan baris header; di dalam tabel <kbd>Tab</kbd> berpindah sel</li>
                 <li>Tabel label–nilai: dua kolom tetap (label di kiri, nilai di kanan), baris dapat ditambah/dihapus, lebar kolom label 20%, 25%, atau 30%. Kolom tidak dapat ditambah, dihapus, atau digabung.</li>
+                <li>Klausul persetujuan: judul (teks biasa), penjelasan (paragraf dan daftar), dan pengaturan “Wajib dijawab Ya” (aktif secara bawaan). Pilihan jawaban selalu “Tidak” dan “Ya” tanpa jawaban bawaan. ID klausul dibuat otomatis; klausul tidak dapat ditempatkan di dalam klausul, daftar, atau tabel. <kbd>Enter</kbd> pada judul berpindah ke penjelasan.</li>
                 <li>Urungkan (<kbd>Ctrl</kbd>+<kbd>Z</kbd>) dan ulangi (<kbd>Ctrl</kbd>+<kbd>Y</kbd>)</li>
                 <li>Placeholder hanya dari katalog sistem, tampil sebagai label (mis. “Nama lengkap”). Placeholder dapat disisipkan atau dihapus, tetapi kuncinya tidak dapat diubah.</li>
                 <li><kbd>Esc</kbd> atau <kbd>Alt</kbd>+<kbd>F10</kbd>: pindah ke toolbar. Di toolbar, gunakan tombol panah; <kbd>Esc</kbd> kembali ke isi dokumen.</li>
               </ul>
               <p><strong>Tidak didukung:</strong> gambar, tautan, skrip, gaya/warna, dan sel gabungan. Isi tempelan dibatasi ke format di atas. Nilai placeholder selalu tampil sebagai teks biasa.</p>
-              <p>Isi disimpan sebagai JSON terstruktur (format <code>${RT.FORMAT}</code> versi ${RT.FORMAT_VERSIONS.join(' atau ')}; versi 2 hanya bila dokumen memuat tabel label–nilai). Ukuran maksimal ${RT.LIMITS.contentJson.toLocaleString('id-ID')} karakter JSON; isi tidak pernah dipotong otomatis.</p>
+              <p>Isi disimpan sebagai JSON terstruktur (format <code>${RT.FORMAT}</code> versi ${RT.FORMAT_VERSIONS.join(', ')}; versi 2 bila dokumen memuat tabel label–nilai, versi 3 bila memuat klausul persetujuan). Ukuran maksimal ${RT.LIMITS.contentJson.toLocaleString('id-ID')} karakter JSON; isi tidak pernah dipotong otomatis.</p>
             </details>
           </div>
           <section class="preview-col" id="preview-col" aria-labelledby="preview-h">
@@ -692,6 +698,7 @@
     bulletList: '<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/>',
     orderedList: '<path d="M10 6h10M10 12h10M10 18h10M4 4h1.5v4M4 8h3M4 14.5c0-1 2.5-1.5 2.5 0S4 17 4 18h3"/>',
     insertTable: '<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9.5h18M3 15h18M9 4v16M15 4v16"/>',
+    insertClause: '<rect x="3" y="4" width="18" height="16" rx="1.5"/><circle cx="8" cy="15" r="2"/><circle cx="16" cy="15" r="2"/><path d="M6 8.5h12"/>',
     insertKvTable: '<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9.5h18M3 15h18M9 4v16"/><path d="M4.5 6.8h3M4.5 12.3h3M4.5 17.6h3" stroke-width="1.4"/>',
   };
   const icon = (k) => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[k]}</svg>`;
@@ -699,6 +706,7 @@
   const inTable = (ed) => ed.isActive('table');
   const inList = (ed) => ed.isActive('listItem');
   const inKv = (ed) => ed.isActive('table', { preset: 'labelValue' });
+  const inClause = (ed) => ed.isActive('consentClause');
   const kvWidth = (n) => ({ run: (c) => c.setLabelWidth(n), active: (ed) => ed.isActive('table', { preset: 'labelValue', labelWidth: n }), kv: true });
   // `run` receives a Tiptap chain; `active` (toggle buttons only) sets aria-pressed.
   const COMMANDS = {
@@ -730,11 +738,15 @@
     kvWidth20: kvWidth(20),
     kvWidth25: kvWidth(25),
     kvWidth30: kvWidth(30),
+    insertClause: { run: (c) => c.insertConsentClause(), block: true },
+    clauseRequired: { run: (c) => c.toggleClauseRequired(), active: (ed) => ed.isActive('consentClause', { required: true }), clause: true },
+    deleteClause: { run: (c) => c.deleteConsentClause(), clause: true },
   };
 
   function canRun(ed, key) {
     const spec = COMMANDS[key];
-    if (spec.block && (inTable(ed) || inList(ed))) return false;
+    if (spec.block && (inTable(ed) || inList(ed) || inClause(ed))) return false;
+    if (spec.clause && !inClause(ed)) return false;
     if (spec.table && !inTable(ed)) return false;
     if (spec.plain && inKv(ed)) return false;
     if (spec.kv && !inKv(ed)) return false;
@@ -763,6 +775,8 @@
           tool('toggleHeaderRow', 'Baris header', 'Header') + tool('deleteTable', 'Hapus tabel', 'Hapus tabel'))}
         ${group('Tabel label–nilai', tool('insertKvTable', 'Tabel label–nilai', icon('insertKvTable') + '<span class="tool-text">Tabel label–nilai</span>') +
           tool('kvWidth20', 'Lebar kolom label 20%', '20%') + tool('kvWidth25', 'Lebar kolom label 25%', '25%') + tool('kvWidth30', 'Lebar kolom label 30%', '30%'))}
+        ${group('Klausul persetujuan', tool('insertClause', 'Klausul persetujuan', icon('insertClause') + '<span class="tool-text">Klausul persetujuan</span>') +
+          tool('clauseRequired', 'Wajib dijawab Ya', 'Wajib dijawab Ya') + tool('deleteClause', 'Hapus klausul', 'Hapus klausul'))}
         <div class="tool-group" role="group" aria-label="Placeholder">
           <div class="ph-wrap">
             <button type="button" class="tool tool-ph" tabindex="-1" id="ph-btn" data-action="ph-toggle" aria-haspopup="menu" aria-expanded="false" aria-controls="ph-menu">Sisipkan placeholder ▾</button>
@@ -1276,12 +1290,32 @@
   const a11yTables = (html) => html.replace(/<div class="table-wrap">/g,
     '<div class="table-wrap" tabindex="0" role="region" aria-label="Tabel, geser untuk melihat semua kolom">');
 
+  const answerLabel = (v) => (v == null ? 'Tidak dijawab' : (RT.CLAUSE_ANSWERS.find((x) => x.value === v) || { label: v }).label);
+  const clausesOf = (s) => s.clauses || [];
+
+  /** Unconfirmed answers for this assignment (empty when first opened). */
+  function draftAnswers(a) {
+    if (!app.clauseDraft || app.clauseDraft.assignmentId !== a.id) app.clauseDraft = { assignmentId: a.id, answers: {} };
+    return app.clauseDraft.answers;
+  }
+
+  /** Recorded answers next to the acceptance (read-only). */
+  function recordedAnswersHtml(s, acc) {
+    const clauses = clausesOf(s);
+    if (!clauses.length) return '';
+    if (!acc.answers) return '<p>Jawaban klausul tidak tercatat untuk persetujuan ini.</p>';
+    return `
+      <h3 class="recorded-h">Jawaban klausul yang dicatat</h3>
+      <dl class="dl dl-compact recorded-answers">${clauses.map((c) => `<dt>${esc(c.title)}</dt><dd data-clause-answer="${esc(c.id)}">${esc(answerLabel(acc.answers[c.id]))}</dd>`).join('')}</dl>`;
+  }
+
   function renderUserDoc(route) {
     const a = U.getAssignment(app.user, route.id);
     if (!a) return userNotFound();
     const s = a.snapshot;
     const acc = U.acceptanceFor(app.user, a);
     const unavailable = s.missing.length > 0;
+    const hasClauses = clausesOf(s).length > 0 && !unavailable;
 
     const accepted = acc ? `
       <section class="callout callout-success" id="accept-result" tabindex="-1" role="status" aria-labelledby="accepted-h">
@@ -1290,6 +1324,7 @@
           <dt>Versi disetujui</dt><dd>Versi ${s.templateVersion}</dd>
           <dt>Waktu persetujuan</dt><dd>${timeTag(acc.acceptedAt)}</dd>
         </dl>
+        ${recordedAnswersHtml(s, acc)}
         <p>Dokumen di bawah ini hanya baca dan sama persis dengan yang Anda setujui.</p>
       </section>` : '';
 
@@ -1314,10 +1349,11 @@
           <input type="checkbox" id="consent"${unavailable ? ' disabled' : ''} aria-describedby="accept-hint">
           <span>${CONSENT_LABEL}</span>
         </label>
-        <button type="button" class="btn btn-primary btn-block" id="btn-accept" data-action="user-accept" data-id="${esc(a.id)}" disabled aria-describedby="accept-hint">Setujui Perjanjian</button>
+        <button type="button" class="btn btn-primary btn-block" id="btn-accept" data-action="user-accept" data-id="${esc(a.id)}" disabled aria-describedby="accept-hint${hasClauses ? ' clause-issues' : ''}">Setujui Perjanjian</button>
+        ${hasClauses ? '<div id="clause-issues" class="clause-issues" aria-live="polite"></div>' : ''}
         <p id="accept-hint" class="hint">${unavailable
           ? 'Persetujuan tidak tersedia karena dokumen tidak dapat ditampilkan.'
-          : 'Centang kotak di atas untuk mengaktifkan tombol. Persetujuan baru dicatat setelah Anda mengonfirmasi.'}</p>
+          : `${hasClauses ? 'Jawab klausul persetujuan dan c' : 'C'}entang kotak di atas untuk mengaktifkan tombol. Persetujuan baru dicatat setelah Anda mengonfirmasi.`}</p>
       </section>`;
 
     return `
@@ -1335,10 +1371,65 @@
       </div>`;
   }
 
-  function bindUser() {
+  /** Clause fieldsets in the user document, keyed by clause ID. */
+  const clauseSets = () => Array.from(document.querySelectorAll('.doc-user fieldset.clause'));
+  const radiosOf = (fs) => Array.from(fs.querySelectorAll('input[type="radio"]'));
+
+  /** Enable “Setujui Perjanjian” only when consent is checked and every required clause is “Ya”. */
+  function updateAcceptState(a) {
+    const btn = $('#btn-accept');
     const consent = $('#consent');
-    if (consent) {
-      consent.addEventListener('change', () => { $('#btn-accept').disabled = !consent.checked; });
+    if (!btn || !consent) return;
+    const issues = U.clauseIssues(a.snapshot, draftAnswers(a));
+    btn.disabled = !consent.checked || consent.disabled || issues.length > 0;
+    const box = $('#clause-issues');
+    if (box) {
+      setHtml(box, issues.length ? `
+        <p><strong>Belum dapat disetujui:</strong></p>
+        <ul>${issues.map((i) => `<li><button type="button" class="link-btn" data-action="focus-clause" data-clause="${esc(i.clauseId)}">${esc(i.message)}</button></li>`).join('')}</ul>` : '');
+    }
+    clauseSets().forEach((fs) => {
+      fs.classList.toggle('is-blocking', issues.some((i) => i.clauseId === fs.dataset.clauseId && i.answer === 'tidak'));
+    });
+  }
+
+  function bindClauses(a, acc) {
+    const sets = clauseSets();
+    if (!sets.length) return;
+    if (acc) {
+      // Read-only: show the recorded answers; nothing can change them.
+      sets.forEach((fs) => {
+        const v = acc.answers ? acc.answers[fs.dataset.clauseId] : undefined;
+        radiosOf(fs).forEach((r) => { r.checked = v != null && r.value === v; });
+        fs.disabled = true;
+        const note = document.createElement('p');
+        note.className = 'clause-recorded';
+        note.textContent = acc.answers ? `Jawaban tercatat: ${answerLabel(v)}` : 'Jawaban tidak tercatat.';
+        fs.appendChild(note);
+      });
+      return;
+    }
+    const answers = draftAnswers(a);
+    sets.forEach((fs) => {
+      radiosOf(fs).forEach((r) => {
+        r.checked = answers[fs.dataset.clauseId] === r.value;
+        // Choosing an answer only updates local state; it never submits or records anything.
+        r.addEventListener('change', () => {
+          if (r.checked) answers[fs.dataset.clauseId] = r.value;
+          updateAcceptState(a);
+        });
+      });
+    });
+  }
+
+  function bindUser() {
+    const route = parseRoute();
+    const a = route.name === 'user-doc' ? U.getAssignment(app.user, route.id) : null;
+    if (a && !a.snapshot.missing.length) bindClauses(a, U.acceptanceFor(app.user, a));
+    const consent = $('#consent');
+    if (consent && a) {
+      consent.addEventListener('change', () => updateAcceptState(a));
+      updateAcceptState(a);
     }
     const panel = $('#sim-panel');
     if (panel) {
@@ -1372,25 +1463,42 @@
     return Boolean(btn && box && btn.dataset.id === id && box.checked && !box.disabled);
   }
 
+  /** The exact snapshot and clause answers currently shown, or null if not acceptable now. */
+  function currentReview(a) {
+    if (a.snapshot.missing.length || !consentGivenFor(a.id)) return null;
+    const answers = U.normalizeAnswers(a.snapshot, draftAnswers(a));
+    if (U.clauseIssues(a.snapshot, answers).length) return null;
+    return { snapshotId: a.snapshot.id, answers };
+  }
+
   function openAcceptModal(id) {
     const a = U.getAssignment(app.user, id);
     if (!a) return;
     if (U.acceptanceFor(app.user, a)) { render(); return; }
-    if (a.snapshot.missing.length || !consentGivenFor(id)) return;
+    const review = currentReview(a);
+    if (!review) { updateAcceptState(a); return; }
     const s = a.snapshot;
+    const clauses = clausesOf(s);
     openModal({
       title: 'Setujui perjanjian?',
       body: `
         <p>Anda akan menyetujui <strong>${esc(s.title)}</strong>, <strong>Versi ${s.templateVersion}</strong>.</p>
-        <p>Persetujuan dicatat untuk dokumen persis seperti yang ditampilkan.</p>
+        ${clauses.length ? `
+          <p>Jawaban klausul yang akan dicatat:</p>
+          <dl class="dl dl-compact">${clauses.map((c) => `<dt>${esc(c.title)}</dt><dd>${esc(answerLabel(review.answers[c.id]))}</dd>`).join('')}</dl>` : ''}
+        <p>Persetujuan dicatat untuk dokumen persis seperti yang ditampilkan${clauses.length ? ', bersama jawaban di atas' : ''}.</p>
         <p class="hint">Simulasi: dicatat di memori untuk pengguna sintetis, tanpa tanda tangan elektronik atau kekuatan hukum.</p>`,
       confirmLabel: 'Ya, setujui',
-      onConfirm: () => confirmAccept(id),
+      onConfirm: () => confirmAccept(id, review),
     });
   }
 
-  /** Re-checks acceptance state on every confirmation (repeated or stale dialogs). */
-  function confirmAccept(id) {
+  /**
+   * Re-checks everything on every confirmation (repeated or stale dialogs):
+   * the record must not exist yet, the page must still show this document with
+   * consent checked, and the answers must equal those reviewed in the dialog.
+   */
+  function confirmAccept(id, reviewed) {
     const a = U.getAssignment(app.user, id);
     if (!a) return;
     const existing = U.acceptanceFor(app.user, a);
@@ -1401,8 +1509,14 @@
     }
     // Leaving the page or unchecking consent means no acceptance.
     if (!consentGivenFor(id)) return;
+    const current = currentReview(a);
+    if (!current || current.snapshotId !== reviewed.snapshotId || JSON.stringify(current.answers) !== JSON.stringify(reviewed.answers)) {
+      toast('Jawaban klausul berubah setelah konfirmasi dibuka. Tidak ada yang dicatat; tinjau lalu setujui kembali.', 'warn');
+      updateAcceptState(a);
+      return;
+    }
     try {
-      U.acceptAssignment(app.user, id, now());
+      U.acceptAssignment(app.user, id, now(), reviewed);
     } catch (err) {
       toast(err.message, 'error');
       render();
@@ -1542,6 +1656,12 @@
         break;
       }
       case 'user-accept': openAcceptModal(id); break;
+      case 'focus-clause': {
+        const fs = clauseSets().find((x) => x.dataset.clauseId === el.dataset.clause);
+        const target = fs && (fs.querySelector('input:checked') || fs.querySelector('input'));
+        if (target) { fs.scrollIntoView({ block: 'center' }); target.focus(); }
+        break;
+      }
       case 'sim-assign': simAssign(); break;
       case 'reload-draft': reloadDraft(); break;
       case 'dismiss-recovered': app.editor.recovered = null; updateEditorLive(); break;
@@ -1549,6 +1669,7 @@
       case 'clear-data':
         if (isDirty(app.editor) && !window.confirm('Perubahan draf belum disimpan akan hilang. Lanjutkan?')) break;
         dropEditor();
+        app.clauseDraft = null;
         app.data = action === 'reset-data' ? S.createSeedState() : { nextId: 1, templates: [] };
         // Clearing templates leaves user snapshots alone: they never depend on templates.
         if (action === 'reset-data') app.user = U.createSeedUserState(app.data);

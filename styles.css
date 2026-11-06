@@ -559,6 +559,60 @@ kbd { font-family: var(--font-mono); font-size: .85em; border: 1px solid var(--b
 }
 .tool-text { margin-left: 6px; }
 
+/* Consent clause (“Klausul persetujuan”): rendered fieldset (preview + user). */
+.doc-body fieldset.clause {
+  margin: 0 0 1.4em; padding: 14px 16px 16px; min-width: 0;
+  border: 1px solid var(--kv-border); border-radius: var(--radius); background: var(--surface);
+}
+.doc-body fieldset.clause.clause-required { border-left: 4px solid var(--accent); }
+.doc-body fieldset.clause.is-blocking { border-color: var(--warn-border); border-left-color: var(--warn); background: var(--warn-soft); }
+.doc-body .clause-title { padding: 0 6px; margin-left: -6px; font-weight: 700; font-size: 1.02em; line-height: 1.4; }
+.doc-body .clause-body > :last-child { margin-bottom: .6em; }
+.doc-body .clause-req {
+  display: inline-block; margin: 0 0 10px; padding: 1px 8px; border-radius: 999px;
+  font: 600 13px/1.6 var(--font-ui); background: var(--accent-soft); color: var(--accent-text);
+}
+.doc-body .clause-sim {
+  margin: 4px 0 10px; padding: 6px 10px; border-radius: var(--radius-sm);
+  font: 13px/1.5 var(--font-ui); background: var(--warn-soft); color: var(--warn); border: 1px dashed var(--warn-border);
+}
+.doc-body .clause-options { display: flex; flex-wrap: wrap; gap: 8px 12px; font-family: var(--font-ui); }
+.doc-body .clause-option {
+  display: inline-flex; align-items: center; gap: 8px; min-height: 44px; min-width: 96px;
+  padding: 0 14px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--surface); cursor: pointer; font-weight: 550;
+}
+.doc-body .clause-option input { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); }
+.doc-body .clause-option:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.doc-body .clause-option:has(input:focus-visible) { outline: 3px solid var(--accent); outline-offset: 2px; }
+.doc-body fieldset.clause:disabled .clause-option { cursor: default; color: var(--text-2); }
+.doc-body .clause-recorded { margin: 10px 0 0; font: 600 14px/1.5 var(--font-ui); color: var(--success); }
+.clause-issues ul { margin: 4px 0 0; padding-left: 1.2em; }
+.clause-issues p { margin: 0; color: var(--warn); }
+.clause-issues .link-btn { text-align: left; }
+.recorded-h { font-size: 15px; margin: 12px 0 4px; }
+
+/* Consent clause inside the visual editor. */
+.rte-content .clause-edit {
+  margin: 0 0 1.2em; border: 1px solid var(--border-strong); border-left: 4px solid var(--border-strong);
+  border-radius: var(--radius); background: var(--surface);
+}
+.rte-content .clause-edit.clause-required { border-left-color: var(--accent); }
+.clause-edit-head, .clause-edit-options {
+  display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 6px 12px;
+  font: 13px/1.5 var(--font-ui); color: var(--text-2); background: var(--surface-2); user-select: none;
+}
+.clause-edit-head { border-bottom: 1px solid var(--border); border-radius: var(--radius) var(--radius) 0 0; }
+.clause-edit-options { border-top: 1px solid var(--border); border-radius: 0 0 var(--radius) var(--radius); }
+.clause-edit-tag { font-weight: 700; color: var(--text); }
+.clause-edit-req { padding: 0 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
+.clause-edit:not(.clause-required) .clause-edit-req { background: var(--surface); color: var(--text-2); border: 1px solid var(--border); }
+.clause-edit-id { font-family: var(--font-mono); color: var(--text-3); margin-left: auto; }
+.clause-edit-radio::before { content: "○ "; }
+.clause-edit-content { padding: 10px 12px 2px; }
+.rte-content .clause-edit-title { font-weight: 700; margin: 0 0 .5em; }
+.rte-content .clause-edit-title.is-empty::before { content: attr(data-hint); color: var(--text-3); font-weight: 400; pointer-events: none; float: left; height: 0; }
+
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; }
 }

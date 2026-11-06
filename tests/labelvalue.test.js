@@ -130,7 +130,7 @@ test('user snapshots use the preview renderer and record renderVersion; existing
   const a = U.assignVersion(user, tpl, t.id, v.number, T2);
   const s = a.snapshot;
   assert.equal(s.renderVersion, RT.RENDER_VERSION);
-  assert.equal(s.formatVersion, 2);
+  assert.equal(s.formatVersion, 3, 'seed sample also holds consent clauses');
   assert.equal(s.html, RT.renderDocument(v.content, {}));
   assert.match(s.html, /<table class="kv-table kv-w25">/);
   assert.equal(JSON.stringify(user.assignments.slice(0, -1)), before, 'existing (Markdown) snapshots unchanged');
