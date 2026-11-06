@@ -37,12 +37,14 @@ browser scripts loaded directly, so there is no other build step.
 
 ```bash
 npm test          # node:test: rich-text JSON, legacy Markdown, lifecycle store, user assignments/acceptance
-npm run test:ui   # builds the bundle, then jsdom: admin smoke, user flow, visual editor (tests/ui-*.js)
+npm run test:ui   # builds the bundle, then jsdom: admin smoke, user flow, visual editor, label–value preset (tests/ui-*.js)
 ```
 
 The UI tests run Tiptap inside jsdom (DOM simulation without layout). Layout,
 real keyboard input, and real paste events were additionally checked manually in
 headless Chromium; that script is not part of the repository.
+The label–value table preset has not yet been checked in a real browser
+(layout, desktop/mobile widths); only its DOM output is tested.
 
 ## Dependencies
 
@@ -186,6 +188,7 @@ only contains the supported nodes, so it cannot produce anything else.
 | Perataan | Rata kiri, tengah, kanan | `Ctrl+Shift+L/E/R` |
 | Daftar | Daftar berpoin, bernomor | `Ctrl+Shift+8/7`; `Tab`/`Shift+Tab` nest |
 | Tabel | Sisipkan tabel (3×2 with header row), + / − baris, + / − kolom, Baris header, Hapus tabel | `Tab` moves between cells |
+| Tabel label–nilai | Tabel label–nilai (inserts the preset), Lebar kolom label 20% / 25% / 30% | `Tab` moves between cells |
 | Placeholder | Sisipkan placeholder (menu) | arrows, `Enter`, `Esc` |
 
 - The toolbar is one tab stop (WAI-ARIA toolbar, roving tabindex): arrow keys,
@@ -194,6 +197,8 @@ only contains the supported nodes, so it cannot produce anything else.
   never a keyboard trap. Toggle buttons expose `aria-pressed`; unavailable
   commands (e.g. row controls outside a table) are `aria-disabled`.
 - Headings and tables are not available inside lists or table cells.
+- See [Label–value table preset](#labelvalue-table-preset-tabel-labelnilai) for
+  the preset's rules.
 - The toolbar wraps on narrow screens; the page never scrolls horizontally.
 - Pasted content is parsed against the editor schema: scripts and event
   handlers never run, and images, links, colours/fonts/other styles,
@@ -218,7 +223,40 @@ Typed text such as `{{nama_lengkap}}` is *not* a placeholder: text containing
 Placeholder values are always substituted as escaped plain text inside
 `<span class="ph-value">`; they never become HTML, editor nodes, or formatting.
 
-## Document format (`richtext-json`, version 1)
+### Label–value table preset (“Tabel label–nilai”)
+
+For profile-style sections (a heading followed by a bordered table of field
+labels and values), the toolbar action **Tabel label–nilai** inserts a table
+with three empty rows of two cells: a label cell (left) and a value cell
+(right). It reuses the same Tiptap table extension as ordinary tables.
+
+- **Rows:** “+ Baris” / “− Baris” (and `Tab` in the last cell) add and remove
+  rows; new rows always get a label and a value cell.
+- **Width:** the left column is 20%, 25% (default), or 30% of the table,
+  chosen with the three width buttons (shown pressed for the current table).
+  No other value can be set or stored.
+- **Fixed structure:** exactly two columns and no merged cells. “+ / − kolom”
+  and “Baris header” are disabled inside the preset; any other change that
+  would add a column, merge cells, or change a cell's kind (for example a
+  direct editor command or pasting a wider table) is refused as a whole and
+  explained in a toast — content is never silently dropped.
+- **Cell content:** the usual rich text (bold/italic/underline, alignment,
+  several paragraphs, lists) and catalogue placeholders. No HTML or CSS editing.
+- **Ordinary tables** keep their own controls (columns, header row) unchanged.
+- An empty preset (only empty cells) is not meaningful content, so a document
+  containing nothing else still fails “Isi dokumen wajib diisi”.
+
+**Appearance** (same CSS for the editor, admin preview/draft/version views, and
+user documents): full available width, thin light-grey borders with rounded
+outer corners (corner cells are rounded too, nothing is clipped), label cells
+with a very light grey background and muted text, white value cells, left
+aligned and vertically centred text, about 18×22 px cell padding on desktop and
+10×12 px at ≤720 px. Rows grow with their content; long text and URLs wrap
+(no ellipsis, no fixed heights). On narrow screens the label column keeps a
+minimum of about 7–8 rem so labels stay legible, and the table always fits the
+document width, so it never needs a horizontal scroll region.
+
+## Document format (`richtext-json`, versions 1 and 2)
 
 New drafts and new published versions store content as a versioned JSON
 envelope; this JSON is the authoritative content (HTML is only derived output):
@@ -254,15 +292,40 @@ Allowed structure (`js/richtext.js`; anything else is rejected, never dropped):
 | `heading` | `text`, `variable` | `level`: 2 or 3 (required); `textAlign` |
 | `bulletList`, `orderedList` | ≥1 `listItem` | `orderedList.start`: integer ≥ 1 |
 | `listItem` | `paragraph` first, then `paragraph`/lists | — |
-| `table` | ≥1 `tableRow`, all with the same number of cells | — |
+| `table` | ≥1 `tableRow`, all with the same number of cells | `preset`: `null` or `"labelValue"` (v2); `labelWidth`: `null` or 20/25/30 (required for `labelValue`, otherwise `null`) |
 | `tableRow` | ≥1 `tableCell`/`tableHeader` | — |
 | `tableCell`, `tableHeader` | ≥1 `paragraph`/lists | `colspan` 1, `rowspan` 1, `colwidth` `null` (no merged cells) |
 | `text` | — | non-empty `text`; `marks`: `bold`, `italic`, `underline` (no attributes, no duplicates) |
 | `variable` | — | `key` from the catalogue (required); may carry marks |
 
+A `labelValue` table additionally needs exactly two cells per row, a
+`tableHeader` (label) first and a `tableCell` (value) second, and
+`formatVersion` 2. Example:
+
+```json
+{ "type": "table", "attrs": { "preset": "labelValue", "labelWidth": 25 },
+  "content": [{ "type": "tableRow", "content": [
+    { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Nama Perusahaan" }] }] },
+    { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "PT Contoh Sinar Fiktif" }] }] }
+  ] }] }
+```
+
+**Versions.** `formatVersion` 1 and 2 are both accepted. Version 2 only adds
+the table preset. When content is stored, the envelope gets the lowest version
+that can express it (2 only if it contains a preset), so existing v1 documents
+and documents without presets stay v1. Nothing is upgraded or restyled
+automatically.
+
+**Layout version.** `RT.RENDER_VERSION` (currently 2) names the HTML/CSS layout
+rules. It is recorded as `renderVersion` on each newly published rich-text
+version and each new rich-text user snapshot. Records created earlier carry no
+`renderVersion` and are left unchanged; the preset's styles only target the new
+`kv-*` classes, so existing documents and snapshots look exactly as before.
+
 Unknown properties, attributes, marks, or nodes, a wrong `format` /
-`formatVersion`, and nesting deeper than 16 levels are reported with the
-top-level block number (e.g. `Blok 3: Jenis elemen “image” tidak didukung.`).
+`formatVersion`, invalid preset structure or width, and nesting deeper than 16
+levels are reported with the top-level block number (e.g.
+`Blok 3: Lebar kolom label harus 20%, 25%, atau 30%.`).
 
 **Size limit:** `JSON.stringify(envelope.document).length` must be at most
 200 000 (JavaScript string length, i.e. UTF-16 code units, of the serialized
@@ -275,7 +338,10 @@ invalid documents. All text is HTML-escaped. Headings render as `<h3>`/`<h4>`
 `align-right` classes (no inline styles); a first row of header cells becomes
 `<thead>` with `scope="col"`, other header cells `scope="row"`. This single
 path is used for the admin preview, draft and version views, and new user
-snapshots of rich-text versions. The admin preview uses synthetic sample values
+snapshots of rich-text versions. A `labelValue` table renders as
+`<div class="kv-wrap"><table class="kv-table kv-w25"><colgroup>…</colgroup><tbody>`
+with each label as `<th scope="row">` and each value as `<td>`; the width class
+is derived from the validated `labelWidth`, never from stored style text. The admin preview uses synthetic sample values
 only.
 
 ## Legacy Markdown compatibility
@@ -319,6 +385,14 @@ only.
 | `tpl_3` Persetujuan Komunikasi Pemasaran | — | JSON, revision 2 (shows centre alignment, italic, underline) |
 | `tpl_4` Pemberitahuan Perubahan Layanan | v1–v3 Markdown | — (Edit → conversion offer) |
 | `tpl_5` Ketentuan Dompet (archived) | v1 Markdown | Markdown (read-only; archived) |
+| `tpl_6` Contoh Profil Perusahaan (fiktif) | — | JSON v2, revision 1: sample for the label–value preset |
+
+`tpl_6` is an explicitly labelled, editable sample: headings “Profil
+Perusahaan” (8 rows, including a long three-paragraph history and a long URL)
+and “Susunan Pengurus Perusahaan” (3 rows). All company details and names are
+fictional static text (`.example` domains, “Contoh” names); it uses no
+placeholders and no personal-data lookups. Catalogue placeholders can still be
+inserted into its cells.
 
 ## Files
 
@@ -332,6 +406,7 @@ only.
 - `styles.css` — single teal accent, shared document styling
 - `tests/dom-harness.js` — shared jsdom setup for the UI tests
 - `tests/richtext.test.js`, `tests/ui-editor.js` — JSON format and visual editor tests
+- `tests/labelvalue.test.js`, `tests/ui-labelvalue.js` — label–value table preset tests
 
 ## Out of scope
 

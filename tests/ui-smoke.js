@@ -5,7 +5,7 @@ const h = load();
 const { w, $, errors, text, tick, go, click, type, confirmDialog, check, setDoc, typeText, para, docText } = h;
 
 (async () => {
-check($('.data-table tbody').children.length === 5, 'list shows 5 seed templates');
+check($('.data-table tbody').children.length === 6, 'list shows 6 seed templates');
 type('#q', 'rujukan');
 check($('.data-table tbody').children.length === 1, 'search filters rows');
 type('#q', 'zzz');

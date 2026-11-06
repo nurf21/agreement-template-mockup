@@ -2,7 +2,16 @@
  * Structured rich-text documents ("richtext-json", formatVersion 1).
  *
  * The JSON envelope is the authoritative stored content:
- *   { format: 'richtext-json', formatVersion: 1, document: { type: 'doc', content: [...] } }
+ *   { format: 'richtext-json', formatVersion: 1 | 2, document: { type: 'doc', content: [...] } }
+ *
+ * Format versions (both stay readable; nothing is upgraded automatically):
+ * - 1: paragraphs, headings, lists, ordinary tables, placeholders.
+ * - 2: adds the table preset “labelValue” (`table.attrs.preset`, with an
+ *   allowlisted `labelWidth` of 20, 25, or 30 percent). `wrap()` picks the
+ *   lowest version that can express a document, so documents without a
+ *   preset keep version 1.
+ * RENDER_VERSION names the HTML layout rules; it is recorded on published
+ * versions and user snapshots created with these rules.
  *
  * This module is the single, dependency-free path for:
  * - validating structure (allowed nodes, marks, attributes, placeholder keys),
@@ -19,7 +28,15 @@
     : root.AgreementMarkdown;
 
   const FORMAT = 'richtext-json';
-  const FORMAT_VERSION = 1;
+  const FORMAT_VERSION = 2; // latest supported
+  const FORMAT_VERSIONS = [1, 2];
+  const RENDER_VERSION = 2;
+  // Table presets: identifier -> allowed left-column widths (percent).
+  // Visual styles are derived from these values; no style strings are stored.
+  const TABLE_PRESETS = Object.freeze({
+    labelValue: Object.freeze({ widths: Object.freeze([20, 25, 30]), defaultWidth: 25, since: 2 }),
+  });
+  const LABEL_VALUE = 'labelValue';
   const KNOWN = new Map(MD.PLACEHOLDERS.map((p) => [p.key, p]));
 
   // Size limit: length of JSON.stringify(envelope.document), in UTF-16 code
@@ -48,7 +65,13 @@
     bulletList: { content: ['listItem'], min: 1 },
     orderedList: { content: ['listItem'], min: 1, attrs: { start: (v) => Number.isInteger(v) && v >= 1 && v <= 999999999 } },
     listItem: { content: ['paragraph', 'bulletList', 'orderedList'], min: 1, first: 'paragraph' },
-    table: { content: ['tableRow'], min: 1 },
+    table: {
+      content: ['tableRow'], min: 1,
+      attrs: {
+        preset: (v) => v === null || Object.prototype.hasOwnProperty.call(TABLE_PRESETS, v),
+        labelWidth: (v) => v === null || TABLE_PRESETS.labelValue.widths.includes(v),
+      },
+    },
     tableRow: { content: ['tableCell', 'tableHeader'], min: 1 },
     tableCell: CELL,
     tableHeader: CELL,
@@ -71,11 +94,20 @@
   }
 
   function emptyContent() {
-    return { format: FORMAT, formatVersion: FORMAT_VERSION, document: { type: 'doc', content: [{ type: 'paragraph' }] } };
+    return { format: FORMAT, formatVersion: 1, document: { type: 'doc', content: [{ type: 'paragraph' }] } };
+  }
+
+  const presetOf = (node) => (isObj(node) && isObj(node.attrs) && node.attrs.preset != null ? node.attrs.preset : null);
+
+  /** Lowest format version able to express the document. */
+  function requiredVersion(document) {
+    let v = 1;
+    walk(document, (n) => { if (n.type === 'table' && presetOf(n) !== null) v = Math.max(v, 2); });
+    return v;
   }
 
   function wrap(document) {
-    return { format: FORMAT, formatVersion: FORMAT_VERSION, document };
+    return { format: FORMAT, formatVersion: requiredVersion(document), document };
   }
 
   /**
@@ -91,12 +123,33 @@
     if (!isObj(envelope)) { add('', 'Isi dokumen harus berupa JSON terstruktur.'); return issues; }
     const extra = Object.keys(envelope).filter((k) => !['format', 'formatVersion', 'document'].includes(k));
     if (envelope.format !== FORMAT) add('', `Format isi tidak didukung (diharapkan “${FORMAT}”).`);
-    if (envelope.formatVersion !== FORMAT_VERSION) add('', `Versi format tidak didukung (diharapkan ${FORMAT_VERSION}).`);
+    if (!FORMAT_VERSIONS.includes(envelope.formatVersion)) add('', `Versi format tidak didukung (didukung: ${FORMAT_VERSIONS.join(', ')}).`);
     if (extra.length) add('', 'Properti tidak dikenal pada isi dokumen: ' + extra.join(', ') + '.');
     if (!isObj(envelope.document) || envelope.document.type !== 'doc') {
       add('', 'Dokumen harus berupa node “doc”.');
       return issues;
     }
+
+    // Rules for table presets (attribute values are checked separately).
+    const presetIssues = (node, rows, where) => {
+      const preset = presetOf(node);
+      const width = isObj(node.attrs) ? node.attrs.labelWidth : undefined;
+      if (preset === null) {
+        if (width != null) add(where, 'Lebar kolom label hanya berlaku untuk tabel label–nilai.');
+        return;
+      }
+      if (preset !== LABEL_VALUE) return;
+      if (envelope.formatVersion < TABLE_PRESETS.labelValue.since) {
+        add(where, `Tabel label–nilai memerlukan format versi ${TABLE_PRESETS.labelValue.since}.`);
+      }
+      if (width == null) add(where, 'Tabel label–nilai wajib memiliki lebar kolom label (20%, 25%, atau 30%).');
+      rows.forEach((r, i) => {
+        const cells = isObj(r) && Array.isArray(r.content) ? r.content : [];
+        if (cells.length !== 2) { add(where, `Tabel label–nilai harus tepat dua kolom (baris ${i + 1} memiliki ${cells.length} sel).`); return; }
+        if (!isObj(cells[0]) || cells[0].type !== 'tableHeader') add(where, `Kolom kiri tabel label–nilai harus berupa sel label (baris ${i + 1}).`);
+        if (!isObj(cells[1]) || cells[1].type !== 'tableCell') add(where, `Kolom kanan tabel label–nilai harus berupa sel nilai (baris ${i + 1}).`);
+      });
+    };
 
     const visit = (node, parentType, where, depth) => {
       if (issues.length >= 50) return;
@@ -121,6 +174,8 @@
         else if (!allowed[k](attrs[k])) {
           if (node.type === 'variable' && k === 'key') add(where, `Placeholder “${String(attrs[k]).slice(0, 40)}” tidak ada dalam katalog sistem.`);
           else if (k === 'colspan' || k === 'rowspan') add(where, 'Sel tabel gabungan tidak didukung.');
+          else if (k === 'preset') add(where, `Jenis tabel “${String(attrs[k]).slice(0, 40)}” tidak didukung.`);
+          else if (k === 'labelWidth') add(where, 'Lebar kolom label harus 20%, 25%, atau 30%.');
           else add(where, `Nilai atribut “${k}” tidak didukung pada ${nameOf(node.type)}.`);
         }
       });
@@ -161,6 +216,7 @@
       if (node.type === 'table') {
         const widths = kids.map((r) => (isObj(r) && Array.isArray(r.content) ? r.content.length : 0));
         if (widths.some((w) => w !== widths[0])) add(where, 'Setiap baris tabel harus memiliki jumlah sel yang sama.');
+        presetIssues(node, kids, where);
       }
       kids.forEach((child, idx) => {
         const here = node.type === 'doc' ? `Blok ${idx + 1}` : where;
@@ -271,6 +327,11 @@
       case 'listItem': return `<li>${kids(node.content)}</li>`;
       case 'table': {
         const rows = node.content;
+        if (presetOf(node) === LABEL_VALUE) {
+          // Width class comes from the validated allowlist (20/25/30), never from stored CSS.
+          const body = rows.map((r) => `<tr><th scope="row">${kids(r.content[0].content)}</th><td>${kids(r.content[1].content)}</td></tr>`).join('');
+          return `<div class="kv-wrap"><table class="kv-table kv-w${node.attrs.labelWidth}"><colgroup><col class="kv-col-label"><col></colgroup><tbody>${body}</tbody></table></div>`;
+        }
         const headRow = rows[0].content.every((c) => c.type === 'tableHeader');
         const row = (r, inHead) => '<tr>' + r.content.map((c) => {
           if (c.type === 'tableHeader') return `<th scope="${inHead ? 'col' : 'row'}">${kids(c.content)}</th>`;
@@ -355,7 +416,7 @@
   }
 
   const api = {
-    FORMAT, FORMAT_VERSION, LIMITS, isEnvelope, emptyContent, wrap, structureIssues, contentIssues,
+    FORMAT, FORMAT_VERSION, FORMAT_VERSIONS, RENDER_VERSION, TABLE_PRESETS, LIMITS, requiredVersion, isEnvelope, emptyContent, wrap, structureIssues, contentIssues,
     hasMeaningfulContent, contentSize, placeholderKeys, validateDraft, renderDocument, plainText,
     convertMarkdown, freezeCopy,
   };

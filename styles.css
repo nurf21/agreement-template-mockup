@@ -2,6 +2,8 @@
   --bg: #f5f6f7;
   --surface: #ffffff;
   --surface-2: #f0f2f4;
+  --kv-label-bg: #f7f8fa;
+  --kv-border: #e1e5ea;
   --border: #d8dce1;
   --border-strong: #aeb6bf;
   --text: #1a1e23;
@@ -515,6 +517,48 @@ kbd { font-family: var(--font-mono); font-size: .85em; border: 1px solid var(--b
   .tool { min-height: 40px; min-width: 40px; }
   .rte-content { padding: 14px 14px; font-size: 16px; }
 }
+/*
+ * Label–value table preset (richtext-json v2). One set of rules for the
+ * editor, the admin preview, and user documents. Widths come only from the
+ * allowlisted classes kv-w20/25/30; rows grow with their content.
+ */
+:is(.doc-body, .rte-content) table.kv-table {
+  width: 100%; min-width: 0; table-layout: fixed; border-collapse: separate; border-spacing: 0;
+  border: 1px solid var(--kv-border); border-radius: var(--radius); margin: 0;
+  font-family: var(--font-ui); font-size: 15px; line-height: 1.55; color: var(--text);
+}
+.kv-wrap { margin: 0 0 1.6em; }
+.rte-content .tableWrapper:has(> table.kv-table) { margin: 0 0 1.6em; }
+.kv-w20 > colgroup > col:first-child { width: 20%; }
+.kv-w25 > colgroup > col:first-child { width: 25%; }
+.kv-w30 > colgroup > col:first-child { width: 30%; }
+:is(.doc-body, .rte-content) .kv-table :is(th, td) {
+  border: 0; border-bottom: 1px solid var(--kv-border); padding: 18px 22px;
+  text-align: left; vertical-align: middle; overflow-wrap: anywhere; word-break: normal;
+}
+:is(.doc-body, .rte-content) .kv-table th {
+  background: var(--kv-label-bg); color: var(--text-3); font-weight: 500; border-right: 1px solid var(--kv-border);
+}
+:is(.doc-body, .rte-content) .kv-table td { background: var(--surface); }
+:is(.doc-body, .rte-content) .kv-table tr:last-child > * { border-bottom: 0; }
+/* Rounded outer corners without overflow clipping: round the corner cells too. */
+.kv-table tr:first-child > :first-child { border-top-left-radius: calc(var(--radius) - 1px); }
+.kv-table tr:first-child > :last-child { border-top-right-radius: calc(var(--radius) - 1px); }
+.kv-table tr:last-child > :first-child { border-bottom-left-radius: calc(var(--radius) - 1px); }
+.kv-table tr:last-child > :last-child { border-bottom-right-radius: calc(var(--radius) - 1px); }
+:is(.doc-body, .rte-content) .kv-table :is(th, td) > * { margin: 0; }
+:is(.doc-body, .rte-content) .kv-table :is(th, td) > * + * { margin-top: .75em; }
+:is(.doc-body, .rte-content) .kv-table :is(ul, ol) { padding-left: 1.3em; }
+@media (max-width: 720px) {
+  :is(.doc-body, .rte-content) table.kv-table { font-size: 14.5px; }
+  :is(.doc-body, .rte-content) .kv-table :is(th, td) { padding: 10px 12px; }
+  /* Keep labels legible on narrow screens; the saved ratio applies when wider. */
+  .kv-w20 > colgroup > col:first-child { width: max(20%, 7rem); }
+  .kv-w25 > colgroup > col:first-child { width: max(25%, 7.5rem); }
+  .kv-w30 > colgroup > col:first-child { width: max(30%, 8rem); }
+}
+.tool-text { margin-left: 6px; }
+
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; }
 }
